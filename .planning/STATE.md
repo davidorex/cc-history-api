@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 5 - Artifact Layer -- IN PROGRESS
+**Current focus:** Phase 5 - Artifact Layer -- COMPLETE. Phase 6 next.
 
 ## Current Position
 
-Phase: 5 of 6 (Artifact Layer) -- IN PROGRESS
-Plan: 7 of 8 complete in current phase
-Status: Plan 05-07 (Artifact CLI Subcommands) finalized. Plan 08 next.
-Last activity: 2026-02-20 -- Completed 05-07-SUMMARY.md (5 CLI subcommands for files, file-history, reconstruct, git-log, artifacts)
+Phase: 5 of 6 (Artifact Layer) -- COMPLETE
+Plan: 8 of 8 complete in current phase
+Status: Plan 05-08 (SSE Artifact Events and FTS File Operations Rebuild) finalized. Phase 5 complete. Phase 6 next.
+Last activity: 2026-02-20 -- Completed 05-08 (3 new SseEvent variants, artifact event emission in watcher, FTS file_operations rebuild)
 
-Progress: [█████████░] ~96% (22 of ~23 total plans)
+Progress: [██████████] ~96% (23 of ~24 total plans)
 
 ## Performance Metrics
 
@@ -31,11 +31,11 @@ Progress: [█████████░] ~96% (22 of ~23 total plans)
 | 02 | 3/3 | 22 min | 7.3 min |
 | 03 | 6/6 | ~30 min | ~5 min |
 | 04 | 2/2 | 8 min | 4 min |
-| 05 | 7/8 | 22 min | 3.1 min |
+| 05 | 8/8 | 25 min | 3.1 min |
 
 **Recent Trend:**
 - Last 5 plans: 3, 3, 3, 3, 3 min
-- Trend: 05-07 Artifact CLI Subcommands completed in 3 min — 2 deviations (daemon_client.rs additions, direct-only mode for file-history/reconstruct)
+- Trend: 05-08 SSE Artifact Events completed in 3 min — 2 deviations (explicit closure type annotations, rusqlite re-export import)
 
 *Updated after each plan completion*
 
@@ -107,5 +107,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 5, Plan 07 finalized. Plan 08 next.
-Resume file: /gsd:execute-plan .planning/phases/05-artifact-layer/05-08-PLAN.md
+Stopped at: Phase 5 complete. All 8 plans finalized. Phase 6 next.
+Resume file: Phase 6 plans TBD

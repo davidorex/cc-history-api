@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Full-Text Search and CLI** - FTS5 search indexes, CLI interface for querying and exporting session data
 - [x] **Phase 3: HTTP API and Daemon** - axum HTTP API at /v1/, Unix domain socket, daemon mode with graceful shutdown
 - [x] **Phase 4: Real-Time Ingestion and Events** - File watcher for live JSONL changes, SSE event stream for connected consumers
-- [ ] **Phase 5: Artifact Layer** - File operation tracking, git operation extraction, tool result matching, content reconstruction, artifact API and CLI
+- [x] **Phase 5: Artifact Layer** - File operation tracking, git operation extraction, tool result matching, content reconstruction, artifact API and CLI
 - [ ] **Phase 6: Version Monitoring** - Active Claude Code version detection, schema drift analysis across versions
 
 ## Phase Details
@@ -111,7 +111,7 @@ Plans:
 - [x] 05-05-PLAN.md — FTS5 file_operations index: rebuild and search functions
 - [x] 05-06-PLAN.md — HTTP API handlers: files, git, artifacts (11 new endpoints)
 - [x] 05-07-PLAN.md — CLI subcommands: files, file-history, reconstruct, git-log, artifacts
-- [ ] 05-08-PLAN.md — SSE events (file:written, file:edited, git:commit) and watcher integration
+- [x] 05-08-PLAN.md — SSE events (file:written, file:edited, git:commit) and watcher integration
 
 ### Phase 6: Version Monitoring
 **Goal**: The daemon actively tracks Claude Code version changes and provides actionable schema drift analysis across versions
@@ -138,5 +138,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
-| 5. Artifact Layer | 7/8 | In progress | - |
+| 5. Artifact Layer | 8/8 | Complete | 2026-02-20 |
 | 6. Version Monitoring | 0/1 | Not started | - |
