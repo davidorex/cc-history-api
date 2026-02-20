@@ -138,5 +138,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
-| 5. Artifact Layer | 6/8 | In progress | - |
+| 5. Artifact Layer | 7/8 | In progress | - |
 | 6. Version Monitoring | 0/1 | Not started | - |
