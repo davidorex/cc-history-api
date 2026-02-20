@@ -380,6 +380,21 @@ pub async fn sync_all(
         "Sync complete"
     );
 
+    // Rebuild FTS5 index if any files were synced (new data ingested).
+    // Skip rebuild when nothing changed to avoid unnecessary work on
+    // no-op syncs. The rebuild re-indexes all message_content rows in
+    // a single pass, keeping the external-content FTS5 table consistent.
+    if result.files_synced > 0 {
+        conn.call(|conn| {
+            crate::fts::rebuild_fts_index(conn)
+        })
+        .await
+        .map_err(|e| match e {
+            tokio_rusqlite::Error::Error(re) => SyncError::Sqlite(re),
+            other => SyncError::TokioRusqlite(other),
+        })?;
+    }
+
     Ok(result)
 }
 
