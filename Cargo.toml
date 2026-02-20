@@ -26,3 +26,6 @@ http-body-util = "0.1"
 notify = { version = "8.2", features = ["macos_fsevent"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
+similar = "2.7"
+glob = "0.3"
+regex = "1"
