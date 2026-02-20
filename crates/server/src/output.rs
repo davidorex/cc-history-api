@@ -9,6 +9,7 @@
 //! - Human-readable: formatted columns and section headers (default)
 //! - JSON: `--json` flag triggers machine-readable output via `print_json`
 
+use claude_history_store::artifact_queries::{FileEntry, FileOperation, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{ModelStats, SessionSummary, TokenStats, ToolStats};
 
@@ -181,6 +182,182 @@ pub fn print_stats(
             model_display, m.message_count, m.percentage
         );
     }
+}
+
+/// Print tracked files in a column-aligned table.
+///
+/// Columns: FILE_PATH (40 chars, truncated with leading ellipsis), SESSION (12 chars),
+/// OPS (operation_count), LAST_MODIFIED (24 chars).
+pub fn print_files_table(files: &[FileEntry]) {
+    if files.is_empty() {
+        println!("No files found.");
+        return;
+    }
+
+    println!(
+        "{:<40}  {:<12}  {:>4}  {:<24}",
+        "FILE_PATH", "SESSION", "OPS", "LAST_MODIFIED"
+    );
+    println!(
+        "{:<40}  {:<12}  {:>4}  {:<24}",
+        "----------------------------------------",
+        "------------",
+        "----",
+        "------------------------"
+    );
+
+    for f in files {
+        let path_display = if f.file_path.len() > 40 {
+            format!("...{}", &f.file_path[f.file_path.len() - 37..])
+        } else {
+            f.file_path.clone()
+        };
+        let sid_short = if f.session_id.len() > 12 {
+            &f.session_id[..12]
+        } else {
+            &f.session_id
+        };
+        let modified_display = if f.last_modified.len() > 24 {
+            &f.last_modified[..24]
+        } else {
+            &f.last_modified
+        };
+
+        println!(
+            "{:<40}  {:<12}  {:>4}  {:<24}",
+            path_display, sid_short, f.operation_count, modified_display
+        );
+    }
+}
+
+/// Print file operations in a column-aligned table.
+///
+/// Columns: TIMESTAMP (24 chars), TYPE (operation_type, 10 chars),
+/// FILE_PATH (40 chars). For write/edit ops, prints a content preview
+/// (first 80 chars) on the next line.
+pub fn print_file_operations(ops: &[FileOperation]) {
+    if ops.is_empty() {
+        println!("No file operations found.");
+        return;
+    }
+
+    println!(
+        "{:<24}  {:<10}  {:<40}",
+        "TIMESTAMP", "TYPE", "FILE_PATH"
+    );
+    println!(
+        "{:<24}  {:<10}  {:<40}",
+        "------------------------",
+        "----------",
+        "----------------------------------------"
+    );
+
+    for op in ops {
+        let ts_display = if op.timestamp.len() > 24 {
+            &op.timestamp[..24]
+        } else {
+            &op.timestamp
+        };
+        let type_display = if op.operation_type.len() > 10 {
+            &op.operation_type[..10]
+        } else {
+            &op.operation_type
+        };
+        let path_display = if op.file_path.len() > 40 {
+            format!("...{}", &op.file_path[op.file_path.len() - 37..])
+        } else {
+            op.file_path.clone()
+        };
+
+        println!(
+            "{:<24}  {:<10}  {:<40}",
+            ts_display, type_display, path_display
+        );
+
+        // Show content preview for write/edit operations
+        if matches!(op.operation_type.as_str(), "write" | "edit") {
+            if let Some(ref content) = op.content {
+                let preview = if content.len() > 80 {
+                    format!("{}...", &content[..80])
+                } else {
+                    content.clone()
+                };
+                // Replace newlines for single-line display
+                let preview = preview.replace('\n', "\\n");
+                println!("  {}", preview);
+            }
+        }
+    }
+}
+
+/// Print git operations in a column-aligned table.
+///
+/// Columns: TIMESTAMP (24 chars), TYPE (operation_type, 10 chars),
+/// BRANCH (12 chars, or "-"), MESSAGE (commit_message truncated to 60 chars, or "-").
+pub fn print_git_operations(ops: &[GitOperation]) {
+    if ops.is_empty() {
+        println!("No git operations found.");
+        return;
+    }
+
+    println!(
+        "{:<24}  {:<10}  {:<12}  {:<60}",
+        "TIMESTAMP", "TYPE", "BRANCH", "MESSAGE"
+    );
+    println!(
+        "{:<24}  {:<10}  {:<12}  {:<60}",
+        "------------------------",
+        "----------",
+        "------------",
+        "------------------------------------------------------------"
+    );
+
+    for op in ops {
+        let ts_display = if op.timestamp.len() > 24 {
+            &op.timestamp[..24]
+        } else {
+            &op.timestamp
+        };
+        let type_display = if op.operation_type.len() > 10 {
+            &op.operation_type[..10]
+        } else {
+            &op.operation_type
+        };
+        let branch = op.branch.as_deref().unwrap_or("-");
+        let branch_display = if branch.len() > 12 {
+            &branch[..12]
+        } else {
+            branch
+        };
+        let message = op.commit_message.as_deref().unwrap_or("-");
+        let msg_display = if message.len() > 60 {
+            format!("{}...", &message[..57])
+        } else {
+            message.to_string()
+        };
+
+        println!(
+            "{:<24}  {:<10}  {:<12}  {:<60}",
+            ts_display, type_display, branch_display, msg_display
+        );
+    }
+}
+
+/// Print combined session artifacts: files section then git operations section.
+///
+/// Prints "Files:" header followed by print_files_table, then a blank line,
+/// then "Git Operations:" header followed by print_git_operations.
+pub fn print_artifacts(artifacts: &SessionArtifacts) {
+    println!("Files:");
+    print_files_table(&artifacts.files);
+    println!();
+    println!("Git Operations:");
+    print_git_operations(&artifacts.git_operations);
+    println!();
+    println!(
+        "Tool Executions: {} total",
+        artifacts.tool_executions.len()
+    );
 }
 
 /// Print any Serialize value as pretty-printed JSON to stdout.
