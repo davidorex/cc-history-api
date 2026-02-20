@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Core Types and Ingestion Pipeline** - Serde type modeling, JSONL parser, SQLite schema, record decomposer, incremental sync, bulk import
 - [x] **Phase 2: Full-Text Search and CLI** - FTS5 search indexes, CLI interface for querying and exporting session data
 - [x] **Phase 3: HTTP API and Daemon** - axum HTTP API at /v1/, Unix domain socket, daemon mode with graceful shutdown
-- [ ] **Phase 4: Real-Time Ingestion and Events** - File watcher for live JSONL changes, SSE event stream for connected consumers
+- [x] **Phase 4: Real-Time Ingestion and Events** - File watcher for live JSONL changes, SSE event stream for connected consumers
 - [ ] **Phase 5: Artifact Layer** - File operation tracking, git operation extraction, tool result matching, content reconstruction, artifact API and CLI
 - [ ] **Phase 6: Version Monitoring** - Active Claude Code version detection, schema drift analysis across versions
 
@@ -89,7 +89,7 @@ Plans:
 
 Plans:
 - [x] 04-01-PLAN.md — SSE event types, broadcast channel in AppState, GET /v1/events endpoint
-- [ ] 04-02-PLAN.md — File watcher module with debounce, sync triggering, SSE event emission, version detection
+- [x] 04-02-PLAN.md — File watcher module with debounce, sync triggering, SSE event emission, version detection
 
 ### Phase 5: Artifact Layer
 **Goal**: Users can query what files Claude Code touched, what git operations it performed, reconstruct file content at any point in a session, and view a unified timeline of all artifacts produced
@@ -132,6 +132,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
-| 4. Real-Time Ingestion and Events | 1/2 | In progress | - |
+| 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
 | 5. Artifact Layer | 0/3 | Not started | - |
 | 6. Version Monitoring | 0/1 | Not started | - |
