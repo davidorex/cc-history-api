@@ -35,6 +35,8 @@ mod output;
 mod serve;
 mod state;
 
+use daemon_client::{ConnectionMode, detect_connection_mode, resolve_socket_path};
+
 #[derive(Parser)]
 #[command(name = "claude-history", about = "Claude Code session history API")]
 struct Cli {
@@ -194,6 +196,29 @@ fn resolve_projects_dir(cli_arg: Option<PathBuf>) -> Option<PathBuf> {
     })
 }
 
+/// Resolve the ConnectionMode for read-only subcommands.
+///
+/// Probes the daemon socket (resolved via CLI arg > env var > default). If the
+/// daemon is running and healthy, returns `ConnectionMode::Daemon`. Otherwise
+/// falls back to `ConnectionMode::Direct` with an open DB connection.
+///
+/// This is called once at startup so all read subcommands share the same mode.
+async fn resolve_connection_mode(db_path_arg: Option<PathBuf>) -> Result<ConnectionMode, String> {
+    let socket_path = resolve_socket_path(None);
+
+    let db_path = resolve_db_path(db_path_arg).ok_or_else(|| {
+        "Could not determine database path. Set CLAUDE_HISTORY_DB_PATH or HOME environment variable, or pass --db-path.".to_string()
+    })?;
+
+    tracing::debug!(
+        socket = %socket_path.display(),
+        db = %db_path.display(),
+        "Detecting connection mode"
+    );
+
+    detect_connection_mode(&socket_path, db_path).await
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     // Initialize tracing with env-filter; defaults to INFO if RUST_LOG is unset.
@@ -209,37 +234,55 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
+        // Serve and Sync bypass ConnectionMode — Serve IS the daemon, Sync is a
+        // write operation that must always open the DB directly.
         Commands::Serve { port, socket } => run_serve(cli.db_path, port, socket).await,
         Commands::Sync { projects_dir } => run_sync(projects_dir, cli.db_path).await,
-        Commands::Search { query, limit, json } => {
-            run_search(cli.db_path, query, limit, json).await
+
+        // All read-only subcommands: detect daemon vs direct DB once at startup.
+        read_cmd => {
+            let mode = match resolve_connection_mode(cli.db_path).await {
+                Ok(m) => m,
+                Err(msg) => {
+                    eprintln!("Error: {}", msg);
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match read_cmd {
+                Commands::Search { query, limit, json } => {
+                    run_search(mode, query, limit, json).await
+                }
+                Commands::Sessions {
+                    project,
+                    after,
+                    before,
+                    limit,
+                    json,
+                } => run_sessions(mode, project, after, before, limit, json).await,
+                Commands::Query {
+                    session_id,
+                    message_type,
+                    model,
+                    tool,
+                    after,
+                    before,
+                    limit,
+                } => run_query(mode, session_id, message_type, model, tool, after, before, limit).await,
+                Commands::Stats { session_id, json } => run_stats(mode, session_id, json).await,
+                Commands::Export { session_id, format } => {
+                    run_export(mode, session_id, format).await
+                }
+                Commands::VersionCheck { json } => run_version_check(mode, json).await,
+                Commands::SchemaDrift {
+                    record_type,
+                    limit,
+                    json,
+                } => run_schema_drift(mode, record_type, limit, json).await,
+                // Serve and Sync already handled above.
+                Commands::Serve { .. } | Commands::Sync { .. } => unreachable!(),
+            }
         }
-        Commands::Sessions {
-            project,
-            after,
-            before,
-            limit,
-            json,
-        } => run_sessions(cli.db_path, project, after, before, limit, json).await,
-        Commands::Query {
-            session_id,
-            message_type,
-            model,
-            tool,
-            after,
-            before,
-            limit,
-        } => run_query(cli.db_path, session_id, message_type, model, tool, after, before, limit).await,
-        Commands::Stats { session_id, json } => run_stats(cli.db_path, session_id, json).await,
-        Commands::Export { session_id, format } => {
-            run_export(cli.db_path, session_id, format).await
-        }
-        Commands::VersionCheck { json } => run_version_check(cli.db_path, json).await,
-        Commands::SchemaDrift {
-            record_type,
-            limit,
-            json,
-        } => run_schema_drift(cli.db_path, record_type, limit, json).await,
     }
 }
 
@@ -322,41 +365,6 @@ async fn run_sync(projects_dir_arg: Option<PathBuf>, db_path_arg: Option<PathBuf
     }
 }
 
-/// Open the database for read-only query subcommands.
-///
-/// Resolves the db_path and initializes the connection. Returns the async
-/// connection handle, or prints an error to stderr and returns None.
-async fn open_db(db_path_arg: Option<PathBuf>) -> Option<tokio_rusqlite::Connection> {
-    let db_path = match resolve_db_path(db_path_arg) {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: Could not determine database path. Set CLAUDE_HISTORY_DB_PATH or HOME environment variable, or pass --db-path.");
-            return None;
-        }
-    };
-
-    if !db_path.exists() {
-        eprintln!(
-            "Error: Database file does not exist: {}\n\
-             Run `claude-history sync` first to create the database.",
-            db_path.display()
-        );
-        return None;
-    }
-
-    match claude_history_store::db::init_db(&db_path).await {
-        Ok(conn) => Some(conn),
-        Err(e) => {
-            eprintln!(
-                "Error: Failed to open database at {}: {}",
-                db_path.display(),
-                e
-            );
-            None
-        }
-    }
-}
-
 /// Start the HTTP API daemon on TCP and Unix domain socket.
 ///
 /// [CLI-01] Opens the database, builds SharedState, resolves the socket path
@@ -433,31 +441,43 @@ async fn run_serve(
 
 /// Search message content using FTS5 full-text search.
 ///
-/// [CLI-05] Calls store::fts::search_messages inside conn.call(), then
-/// formats output via output.rs based on the --json flag. Prints result
-/// count summary to stderr.
+/// [CLI-05, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::fts::search_messages. Output formatting
+/// is identical regardless of data source.
 async fn run_search(
-    db_path_arg: Option<PathBuf>,
+    mode: ConnectionMode,
     query: String,
     limit: usize,
     json: bool,
 ) -> ExitCode {
-    let conn = match open_db(db_path_arg).await {
-        Some(c) => c,
-        None => return ExitCode::FAILURE,
-    };
-
-    let q = query.clone();
-    let results = match conn
-        .call(move |conn| {
-            claude_history_store::fts::search_messages(conn, &q, limit, 0)
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Search failed: {}", e);
-            return ExitCode::FAILURE;
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing search through daemon"
+            );
+            match client.search(&query, Some(limit), None).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon search failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let q = query.clone();
+            match conn
+                .call(move |conn| {
+                    claude_history_store::fts::search_messages(conn, &q, limit, 0)
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Search failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
         }
     };
 
@@ -476,37 +496,58 @@ async fn run_search(
 
 /// List sessions with optional project, date, and limit filters.
 ///
-/// [CLI-04] Calls store::query::list_sessions inside conn.call(), then
-/// formats output as a table or JSON based on the --json flag.
+/// [CLI-04, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::query::list_sessions. Output formatting
+/// is identical regardless of data source.
 async fn run_sessions(
-    db_path_arg: Option<PathBuf>,
+    mode: ConnectionMode,
     project: Option<String>,
     after: Option<String>,
     before: Option<String>,
     limit: usize,
     json: bool,
 ) -> ExitCode {
-    let conn = match open_db(db_path_arg).await {
-        Some(c) => c,
-        None => return ExitCode::FAILURE,
-    };
-
-    let results = match conn
-        .call(move |conn| {
-            claude_history_store::query::list_sessions(
-                conn,
-                project.as_deref(),
-                after.as_deref(),
-                before.as_deref(),
-                limit,
-            )
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Sessions query failed: {}", e);
-            return ExitCode::FAILURE;
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing sessions through daemon"
+            );
+            match client
+                .sessions(
+                    project.as_deref(),
+                    after.as_deref(),
+                    before.as_deref(),
+                    Some(limit),
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon sessions query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::list_sessions(
+                        conn,
+                        project.as_deref(),
+                        after.as_deref(),
+                        before.as_deref(),
+                        limit,
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Sessions query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
         }
     };
 
@@ -523,12 +564,12 @@ async fn run_sessions(
 
 /// Query messages with filters, always outputting JSON.
 ///
-/// [CLI-03] Calls store::query::query_messages inside conn.call().
-/// This subcommand always outputs JSON to stdout (designed for machine
-/// consumption per spec).
+/// [CLI-03, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::query::query_messages. This subcommand
+/// always outputs JSON to stdout (designed for machine consumption per spec).
 #[allow(clippy::too_many_arguments)]
 async fn run_query(
-    db_path_arg: Option<PathBuf>,
+    mode: ConnectionMode,
     session_id: Option<String>,
     message_type: Option<String>,
     model: Option<String>,
@@ -537,30 +578,53 @@ async fn run_query(
     before: Option<String>,
     limit: usize,
 ) -> ExitCode {
-    let conn = match open_db(db_path_arg).await {
-        Some(c) => c,
-        None => return ExitCode::FAILURE,
-    };
-
-    let results = match conn
-        .call(move |conn| {
-            claude_history_store::query::query_messages(
-                conn,
-                session_id.as_deref(),
-                message_type.as_deref(),
-                model.as_deref(),
-                tool.as_deref(),
-                after.as_deref(),
-                before.as_deref(),
-                limit,
-            )
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Query failed: {}", e);
-            return ExitCode::FAILURE;
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing query through daemon"
+            );
+            match client
+                .query_messages(
+                    session_id.as_deref(),
+                    message_type.as_deref(),
+                    model.as_deref(),
+                    tool.as_deref(),
+                    after.as_deref(),
+                    before.as_deref(),
+                    Some(limit),
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::query_messages(
+                        conn,
+                        session_id.as_deref(),
+                        message_type.as_deref(),
+                        model.as_deref(),
+                        tool.as_deref(),
+                        after.as_deref(),
+                        before.as_deref(),
+                        limit,
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
         }
     };
 
@@ -573,35 +637,60 @@ async fn run_query(
 
 /// Show token usage, tool frequency, and model breakdown statistics.
 ///
-/// [CLI-06] Runs three queries: token_stats_by_model (or by_session if
-/// --session-id provided), tool_frequency, and model_breakdown. Output is
-/// either three human-readable sections or a combined JSON object.
+/// [CLI-06, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access. Runs three queries: token_stats, tool_frequency, and
+/// model_breakdown. Output is either three human-readable sections or a combined
+/// JSON object. Output format is identical regardless of data source.
 async fn run_stats(
-    db_path_arg: Option<PathBuf>,
+    mode: ConnectionMode,
     session_id: Option<String>,
     json: bool,
 ) -> ExitCode {
-    let conn = match open_db(db_path_arg).await {
-        Some(c) => c,
-        None => return ExitCode::FAILURE,
-    };
-
-    let sid = session_id.clone();
-    let stats_result = conn
-        .call(move |conn| -> Result<_, tokio_rusqlite::rusqlite::Error> {
-            let token_stats = if let Some(ref sid) = sid {
-                claude_history_store::query::token_stats_by_session(conn, Some(sid.as_str()))
+    let stats_result = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing stats through daemon"
+            );
+            // For daemon mode: if session_id is given, pass group_by=session + session_id.
+            // Otherwise, use default (model) grouping.
+            let group_by = if session_id.is_some() {
+                Some("session")
             } else {
-                claude_history_store::query::token_stats_by_model(conn)
-            }?;
+                None
+            };
+            let token_result = client
+                .stats_tokens(group_by, session_id.as_deref())
+                .await;
+            let tool_result = client.stats_tools().await;
+            let model_result = client.stats_models().await;
 
-            let tool_stats = claude_history_store::query::tool_frequency(conn)?;
+            match (token_result, tool_result, model_result) {
+                (Ok(t), Ok(tl), Ok(m)) => Ok((t, tl, m)),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let sid = session_id.clone();
+            conn.call(move |conn| -> Result<_, tokio_rusqlite::rusqlite::Error> {
+                let token_stats = if let Some(ref sid) = sid {
+                    claude_history_store::query::token_stats_by_session(conn, Some(sid.as_str()))
+                } else {
+                    claude_history_store::query::token_stats_by_model(conn)
+                }?;
 
-            let model_stats = claude_history_store::query::model_breakdown(conn)?;
+                let tool_stats = claude_history_store::query::tool_frequency(conn)?;
 
-            Ok((token_stats, tool_stats, model_stats))
-        })
-        .await;
+                let model_stats = claude_history_store::query::model_breakdown(conn)?;
+
+                Ok((token_stats, tool_stats, model_stats))
+            })
+            .await
+            .map_err(|e| daemon_client::DaemonError::Connection(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))
+        }
+    };
 
     let (token_stats, tool_stats, model_stats) = match stats_result {
         Ok(r) => r,
@@ -635,16 +724,16 @@ async fn run_stats(
 
 /// Export a complete session conversation in JSON, Markdown, or CSV format.
 ///
-/// [CLI-07] Validates the format argument, then delegates to the appropriate
-/// export function. The export runs inside conn.call(), writing to a Vec<u8>
-/// buffer. The buffer is then flushed to stdout outside the closure to avoid
-/// blocking the DB connection thread with I/O.
+/// [CLI-07, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access. Validates the format argument, then delegates to
+/// either the daemon's export endpoint or the local export functions.
+/// Output bytes are written to stdout regardless of data source.
 async fn run_export(
-    db_path_arg: Option<PathBuf>,
+    mode: ConnectionMode,
     session_id: String,
     format: String,
 ) -> ExitCode {
-    // Validate format before opening the database
+    // Validate format before doing any I/O
     let valid_formats = ["json", "markdown", "csv"];
     if !valid_formats.contains(&format.as_str()) {
         eprintln!(
@@ -654,33 +743,40 @@ async fn run_export(
         return ExitCode::FAILURE;
     }
 
-    let conn = match open_db(db_path_arg).await {
-        Some(c) => c,
-        None => return ExitCode::FAILURE,
-    };
-
-    let fmt = format.clone();
-    let sid = session_id.clone();
-    let export_result = conn
-        .call(move |conn| {
-            let mut buffer = Vec::new();
-            let result: Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> = match fmt.as_str() {
-                "json" => export::export_json(conn, &sid, &mut buffer)
-                    .map(|()| buffer)
-                    .map_err(|e| e.to_string().into()),
-                "markdown" => export::export_markdown(conn, &sid, &mut buffer)
-                    .map(|()| buffer)
-                    .map_err(|e| e.to_string().into()),
-                "csv" => export::export_csv(conn, &sid, &mut buffer)
-                    .map(|()| buffer)
-                    .map_err(|e| e.to_string().into()),
-                _ => unreachable!("format validated above"),
-            };
-            result.map_err(|e| {
-                tokio_rusqlite::rusqlite::Error::ToSqlConversionFailure(e)
+    let export_result = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing export through daemon"
+            );
+            client.export_session(&session_id, Some(format.as_str())).await
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let fmt = format.clone();
+            let sid = session_id.clone();
+            conn.call(move |conn| {
+                let mut buffer = Vec::new();
+                let result: Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> =
+                    match fmt.as_str() {
+                        "json" => export::export_json(conn, &sid, &mut buffer)
+                            .map(|()| buffer)
+                            .map_err(|e| e.to_string().into()),
+                        "markdown" => export::export_markdown(conn, &sid, &mut buffer)
+                            .map(|()| buffer)
+                            .map_err(|e| e.to_string().into()),
+                        "csv" => export::export_csv(conn, &sid, &mut buffer)
+                            .map(|()| buffer)
+                            .map_err(|e| e.to_string().into()),
+                        _ => unreachable!("format validated above"),
+                    };
+                result.map_err(|e| tokio_rusqlite::rusqlite::Error::ToSqlConversionFailure(e))
             })
-        })
-        .await;
+            .await
+            .map_err(|e| daemon_client::DaemonError::Connection(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))
+        }
+    };
 
     match export_result {
         Ok(buffer) => {
@@ -701,24 +797,35 @@ async fn run_export(
 
 /// Show Claude Code version history detected from ingested data.
 ///
-/// [CLI-08] Calls store::query::version_history inside conn.call(), returning
-/// distinct version strings with their first and last seen timestamps. Output
-/// is either a column-aligned table (default) or JSON (--json flag). If no
-/// version data is found, prints a suggestion to run sync first.
-async fn run_version_check(db_path_arg: Option<PathBuf>, json: bool) -> ExitCode {
-    let conn = match open_db(db_path_arg).await {
-        Some(c) => c,
-        None => return ExitCode::FAILURE,
-    };
-
-    let results = match conn
-        .call(move |conn| claude_history_store::query::version_history(conn))
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Version check failed: {}", e);
-            return ExitCode::FAILURE;
+/// [CLI-08, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::query::version_history. Output format
+/// is identical regardless of data source.
+async fn run_version_check(mode: ConnectionMode, json: bool) -> ExitCode {
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing version-check through daemon"
+            );
+            match client.version_history().await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon version check failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            match conn
+                .call(move |conn| claude_history_store::query::version_history(conn))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Version check failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
         }
     };
 
@@ -770,46 +877,61 @@ async fn run_version_check(db_path_arg: Option<PathBuf>, json: bool) -> ExitCode
 
 /// Show schema drift events (unknown fields captured during ingestion).
 ///
-/// [CLI-09] Calls store::query::schema_drift_list inside conn.call(), returning
-/// all schema_drift_log entries. Applies optional record_type filter and limit
-/// in Rust after retrieval (keeps query.rs simple; filter could move to SQL
-/// later if performance warrants). Output is either a column-aligned table
-/// (default) or JSON (--json flag). If no drift entries exist, prints a
-/// helpful message.
+/// [CLI-09, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::query::schema_drift_list. In daemon mode,
+/// the daemon applies record_type filtering and limit on the server side.
+/// In direct mode, filtering and limit are applied in Rust post-retrieval.
+/// Output format is identical regardless of data source.
 async fn run_schema_drift(
-    db_path_arg: Option<PathBuf>,
+    mode: ConnectionMode,
     record_type: Option<String>,
     limit: usize,
     json: bool,
 ) -> ExitCode {
-    let conn = match open_db(db_path_arg).await {
-        Some(c) => c,
-        None => return ExitCode::FAILURE,
-    };
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing schema-drift through daemon"
+            );
+            // Daemon endpoint handles record_type filter and limit server-side.
+            match client
+                .schema_drift(record_type.as_deref(), Some(limit))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon schema drift query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let all_results = match conn
+                .call(move |conn| claude_history_store::query::schema_drift_list(conn))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Schema drift query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
 
-    let all_results = match conn
-        .call(move |conn| claude_history_store::query::schema_drift_list(conn))
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Schema drift query failed: {}", e);
-            return ExitCode::FAILURE;
+            // Apply record_type filter in Rust if provided
+            let filtered: Vec<_> = if let Some(ref rt) = record_type {
+                all_results
+                    .into_iter()
+                    .filter(|e| e.record_type == *rt)
+                    .collect()
+            } else {
+                all_results
+            };
+
+            // Apply limit truncation
+            filtered.into_iter().take(limit).collect()
         }
     };
-
-    // Apply record_type filter in Rust if provided
-    let filtered: Vec<_> = if let Some(ref rt) = record_type {
-        all_results
-            .into_iter()
-            .filter(|e| e.record_type == *rt)
-            .collect()
-    } else {
-        all_results
-    };
-
-    // Apply limit truncation
-    let results: Vec<_> = filtered.into_iter().take(limit).collect();
 
     if results.is_empty() {
         eprintln!("No schema drift detected.");
