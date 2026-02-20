@@ -1,8 +1,8 @@
 //! API module — HTTP handler types, error conversion, and route construction.
 //!
 //! Exposes endpoint handlers organized by resource (health, sessions, messages,
-//! search, analytics, export, schema) and a `build_router` function that
-//! assembles all 16 routes into an axum Router with shared application state
+//! search, analytics, export, schema, events) and a `build_router` function that
+//! assembles all 17 routes into an axum Router with shared application state
 //! and TraceLayer middleware for request/response logging.
 
 pub mod analytics;
@@ -18,11 +18,12 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::trace::TraceLayer;
 
+use crate::events;
 use crate::state::SharedState;
 
 /// Build the axum Router with all API routes and shared state.
 ///
-/// Registers 16 endpoints across 7 resource groups with TraceLayer
+/// Registers 17 endpoints across 8 resource groups with TraceLayer
 /// middleware for structured request/response logging:
 ///
 /// **Health:**
@@ -54,6 +55,9 @@ use crate::state::SharedState;
 /// **Schema:**
 ///   - GET /v1/schema/versions
 ///   - GET /v1/schema/drift
+///
+/// **Events:**
+///   - GET /v1/events (SSE stream)
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
         // Health
@@ -82,6 +86,8 @@ pub fn build_router(state: SharedState) -> Router {
         // Schema
         .route("/v1/schema/versions", get(schema::versions))
         .route("/v1/schema/drift", get(schema::drift))
+        // Events (SSE)
+        .route("/v1/events", get(events::events_handler))
         // Middleware
         .layer(TraceLayer::new_for_http())
         // Shared state
