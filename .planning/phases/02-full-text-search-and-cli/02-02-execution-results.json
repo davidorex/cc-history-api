@@ -1,0 +1,54 @@
+{
+  "plan_path": ".planning/phases/02-full-text-search-and-cli/02-02-PLAN.md",
+  "plan_name": "CLI Search, Sessions, Query, Stats",
+  "phase": "02-full-text-search-and-cli",
+  "plan_prefix": "02-02",
+  "status": "complete",
+  "tasks": [
+    {
+      "name": "Task 1: Dependencies + Commands enum + output formatting module",
+      "status": "complete",
+      "commit_hash": "d16d187",
+      "commit_type": "feat",
+      "notes": "Added chrono/csv workspace deps, serde/serde_json/chrono/tokio-rusqlite server deps, created output.rs with 4 formatting functions, expanded Commands enum with 4 new variants, moved --db-path to global Cli struct"
+    },
+    {
+      "name": "Task 2: Wire search, sessions, query, stats handlers",
+      "status": "complete",
+      "commit_hash": "8c81868",
+      "commit_type": "feat",
+      "notes": "Implemented open_db() helper, run_search, run_sessions, run_query, run_stats handlers. Fixed --type clap attribute (Rule 1), added tokio-rusqlite dep (Rule 3), added explicit closure return type (Rule 3). All verified with real synced data."
+    }
+  ],
+  "decisions": [
+    "Moved --db-path to global Cli struct — shared across all subcommands",
+    "open_db() checks file existence before init_db — actionable error message",
+    "Query subcommand always outputs JSON (no --json flag) — machine consumption",
+    "Stats --json outputs single combined JSON object with three keys",
+    "csv crate added proactively to workspace for Plan 03"
+  ],
+  "issues_logged": [],
+  "deviations": [
+    {
+      "rule": 1,
+      "type": "Bug",
+      "description": "Fixed --type flag: plan specified name='type' but correct clap attribute is long='type'",
+      "task": "Task 2",
+      "commit": "8c81868"
+    },
+    {
+      "rule": 3,
+      "type": "Blocking",
+      "description": "Added tokio-rusqlite dependency to server crate for conn.call() async bridge",
+      "task": "Task 2",
+      "commit": "8c81868"
+    },
+    {
+      "rule": 3,
+      "type": "Blocking",
+      "description": "Added explicit closure return type to disambiguate multiple From<rusqlite::Error> impls",
+      "task": "Task 2",
+      "commit": "8c81868"
+    }
+  ]
+}

@@ -10,29 +10,29 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 2 of 6 (Full-Text Search and CLI) — IN PROGRESS
-Plan: 1 of 3 complete in current phase
-Status: Plan 02-01 (FTS5 Index + Store Query Layer) complete. Next: 02-02 (CLI search/sessions/query/stats).
-Last activity: 2026-02-20 -- Completed 02-01-PLAN.md (FTS5 + query layer)
+Plan: 2 of 3 complete in current phase
+Status: Plan 02-02 (CLI search/sessions/query/stats) complete. Next: 02-03 (CLI export/version-check/schema-drift).
+Last activity: 2026-02-20 -- Completed 02-02-PLAN.md (CLI search/sessions/query/stats)
 
-Progress: [████░░░░░░] ~33% (5 of ~15 total plans)
+Progress: [████░░░░░░] ~40% (6 of ~15 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Average duration: 6.4 min
-- Total execution time: 0.5 hours
+- Total plans completed: 6
+- Average duration: 7.3 min
+- Total execution time: 0.7 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 4/4 | 28 min | 7 min |
-| 02 | 1/3 | 4 min | 4 min |
+| 02 | 2/3 | 16 min | 8 min |
 
 **Recent Trend:**
-- Last 5 plans: 6, 5, 10, 4 min
-- Trend: stable-to-improving (02-01 faster due to no TDD and familiar patterns)
+- Last 5 plans: 5, 10, 4, 12 min
+- Trend: 02-02 took longer due to dependency resolution and error type disambiguation at compile time
 
 *Updated after each plan completion*
 
@@ -59,6 +59,11 @@ Recent decisions affecting current work:
 - [02-01]: FTS5 external-content mode with rebuild-after-sync — avoids storage duplication while keeping index consistent
 - [02-01]: User query input sanitized by double-quote wrapping — prevents FTS5 syntax injection, treats as phrase search
 - [02-01]: Dynamic query parameters use Box<dyn ToSql> with params_from_iter — handles variable-count WHERE clauses
+- [02-02]: Moved --db-path to global Cli struct — shared across all subcommands without repetition
+- [02-02]: open_db() checks db file existence before init_db — actionable error message suggesting sync first
+- [02-02]: Query subcommand always JSON (no --json flag) — machine consumption per spec
+- [02-02]: Stats --json combines three queries into single JSON object with token_usage/tool_frequency/model_breakdown keys
+- [02-02]: csv crate pre-staged in workspace deps for Plan 03
 
 ### Pending Todos
 
@@ -71,5 +76,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Plan 02-01 complete, ready for 02-02 execution
-Resume file: .planning/phases/02-full-text-search-and-cli/02-02-PLAN.md
+Stopped at: Plan 02-02 complete, ready for 02-03 execution
+Resume file: .planning/phases/02-full-text-search-and-cli/02-03-PLAN.md
