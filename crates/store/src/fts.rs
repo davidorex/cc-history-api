@@ -13,13 +13,13 @@
 //! Requirement IDs: FTS-01, FTS-03
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A single search result from FTS5 full-text search over message content.
 ///
 /// Includes session context (session_id, message_type, timestamp) joined from
 /// the messages table, plus the FTS5 snippet and BM25 rank score.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     /// UUID of the message containing the matched content block.
     pub message_uuid: String,

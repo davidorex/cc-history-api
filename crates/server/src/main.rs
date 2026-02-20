@@ -29,6 +29,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod api;
+pub mod daemon_client;
 mod export;
 mod output;
 mod serve;

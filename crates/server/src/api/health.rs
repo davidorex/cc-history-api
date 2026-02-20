@@ -10,13 +10,13 @@
 
 use axum::extract::State;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::error::ApiError;
 use crate::state::SharedState;
 
 /// JSON response body for the health check endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
     /// Server status indicator (e.g., "ok").
     pub status: String,

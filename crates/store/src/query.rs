@@ -14,14 +14,14 @@
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Result structs
 // ---------------------------------------------------------------------------
 
 /// Summary of a session for the `sessions` CLI subcommand.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: String,
     pub project_path: Option<String>,
@@ -32,7 +32,7 @@ pub struct SessionSummary {
 }
 
 /// A single message row for the `query` CLI subcommand.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MessageResult {
     pub uuid: String,
     pub session_id: String,
@@ -43,7 +43,7 @@ pub struct MessageResult {
 }
 
 /// Aggregated token statistics grouped by a key (model or session).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TokenStats {
     pub group_key: String,
     pub message_count: i64,
@@ -54,7 +54,7 @@ pub struct TokenStats {
 }
 
 /// Tool invocation statistics.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ToolStats {
     pub tool_name: String,
     pub invocations: i64,
@@ -62,7 +62,7 @@ pub struct ToolStats {
 }
 
 /// Model usage breakdown with percentage.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ModelStats {
     pub model: String,
     pub message_count: i64,
@@ -70,7 +70,7 @@ pub struct ModelStats {
 }
 
 /// Version history entry.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VersionEntry {
     pub version: String,
     pub first_seen: String,
@@ -78,7 +78,7 @@ pub struct VersionEntry {
 }
 
 /// Schema drift log entry.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DriftEntry {
     pub field_name: String,
     pub record_type: String,
@@ -89,7 +89,7 @@ pub struct DriftEntry {
 }
 
 /// Detailed session information for the API `GET /sessions/:id` endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionDetail {
     pub session_id: String,
     pub project_path: Option<String>,
@@ -104,7 +104,7 @@ pub struct SessionDetail {
 
 /// A message in a session conversation with content blocks and token usage.
 /// Used by the API `GET /sessions/:id/conversation` endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub uuid: String,
     pub session_id: String,
@@ -119,7 +119,7 @@ pub struct ConversationMessage {
 
 /// A node in the session message tree showing parent-child relationships.
 /// Used by the API `GET /sessions/:id/tree` endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TreeNode {
     pub uuid: String,
     pub parent_uuid: Option<String>,
@@ -132,7 +132,7 @@ pub struct TreeNode {
 
 /// An agent entry from the agents table.
 /// Used by the API `GET /sessions/:id/agents` endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AgentEntry {
     pub agent_id: String,
     pub session_id: Option<String>,
@@ -142,7 +142,7 @@ pub struct AgentEntry {
 
 /// Aggregated summary statistics for a session.
 /// Used by the API `GET /sessions/:id/summary` endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionSummaryStats {
     pub session_id: String,
     pub message_count: i64,
@@ -156,7 +156,7 @@ pub struct SessionSummaryStats {
 }
 
 /// A message with content blocks and token usage for export.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExportMessage {
     pub uuid: String,
     pub session_id: String,
@@ -169,7 +169,7 @@ pub struct ExportMessage {
 }
 
 /// A content block within an exported message.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExportContentBlock {
     pub block_index: i64,
     pub block_type: String,
@@ -181,7 +181,7 @@ pub struct ExportContentBlock {
 }
 
 /// Token usage data for an exported message.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExportTokenUsage {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
