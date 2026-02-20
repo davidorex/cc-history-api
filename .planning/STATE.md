@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 4 - Real-Time Ingestion and Events -- PLANNED
+**Current focus:** Phase 4 - Real-Time Ingestion and Events -- IN PROGRESS
 
 ## Current Position
 
-Phase: 4 of 6 (Real-Time Ingestion and Events) -- PLANNED
-Plan: 0 of 2 complete in current phase -- ready for execution
-Status: Phase 4 planned with 2 plans in 2 waves. Plan 01: SSE event types, broadcast channel, GET /v1/events endpoint. Plan 02: File watcher with debounce, sync triggering, all 4 SSE event emissions, version detection. Both autonomous.
-Last activity: 2026-02-20 -- Phase 4 planning complete (research + planning + verification)
+Phase: 4 of 6 (Real-Time Ingestion and Events) -- IN PROGRESS
+Plan: 1 of 2 complete in current phase
+Status: Plan 01 (SSE Event Infrastructure) complete. Plan 02 (File Watcher) ready for execution.
+Last activity: 2026-02-20 -- Completed 04-01-PLAN.md (SSE event types, broadcast channel, GET /v1/events endpoint)
 
-Progress: [███████░░░] ~68% (13 of ~21 total plans)
+Progress: [████████░░] ~71% (14 of ~21 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 13
-- Average duration: ~6.5 min
-- Total execution time: ~1.4 hours
+- Total plans completed: 14
+- Average duration: ~6.2 min
+- Total execution time: ~1.45 hours
 
 **By Phase:**
 
@@ -30,10 +30,11 @@ Progress: [███████░░░] ~68% (13 of ~21 total plans)
 | 01 | 4/4 | 28 min | 7 min |
 | 02 | 3/3 | 22 min | 7.3 min |
 | 03 | 6/6 | ~30 min | ~5 min |
+| 04 | 1/2 | 3 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: 6, 5, 5, 5, 4 min
-- Trend: 03-06 CLI wiring executed cleanly with no deviations; all 7 handlers updated in single dispatch refactor
+- Last 5 plans: 5, 5, 5, 4, 3 min
+- Trend: 04-01 SSE infrastructure completed in 3 min — 1 deviation (commit boundary shift for compile coherence)
 
 *Updated after each plan completion*
 
@@ -81,6 +82,9 @@ Recent decisions affecting current work:
 - [03-06]: All 7 read-only handlers updated in single commit due to shared dispatch refactor — cannot compile with partial conversion
 - [03-06]: Daemon communication failures produce explicit errors rather than silent fallback to direct DB mid-request
 - [03-06]: Stats daemon routing uses group_by=session when session_id present, matching direct DB token_stats_by_model vs token_stats_by_session logic
+- [04-01]: SseEvent uses manual event_type()/to_json_data() methods instead of serde tag/content — SSE event name set via axum Event::event(), data payload is flat JSON without enum wrapper
+- [04-01]: Broadcast channel capacity 1024 — aims for ~100 seconds buffer at 10 events/second, tunable later
+- [04-01]: Lagged errors silently dropped via filter_map — slow SSE clients lose events gracefully rather than blocking producers
 
 ### Pending Todos
 
@@ -93,5 +97,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 4 planned, ready for execution
+Stopped at: Phase 4 Plan 01 complete, Plan 02 ready for execution
 Resume file: /gsd:execute-phase 4
