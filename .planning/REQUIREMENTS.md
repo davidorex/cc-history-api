@@ -178,13 +178,114 @@ Deferred to future release. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (populated during roadmap creation) | | |
+| CORE-01 | Phase 1 | Pending |
+| CORE-02 | Phase 1 | Pending |
+| CORE-03 | Phase 1 | Pending |
+| CORE-04 | Phase 1 | Pending |
+| CORE-05 | Phase 1 | Pending |
+| CORE-06 | Phase 1 | Pending |
+| CORE-07 | Phase 1 | Pending |
+| STORE-01 | Phase 1 | Pending |
+| STORE-02 | Phase 1 | Pending |
+| STORE-03 | Phase 1 | Pending |
+| STORE-04 | Phase 1 | Pending |
+| STORE-05 | Phase 1 | Pending |
+| STORE-06 | Phase 1 | Pending |
+| DECOMP-01 | Phase 1 | Pending |
+| DECOMP-02 | Phase 1 | Pending |
+| DECOMP-03 | Phase 1 | Pending |
+| DECOMP-04 | Phase 1 | Pending |
+| DECOMP-05 | Phase 1 | Pending |
+| DECOMP-06 | Phase 1 | Pending |
+| SYNC-01 | Phase 1 | Pending |
+| SYNC-02 | Phase 1 | Pending |
+| SYNC-03 | Phase 1 | Pending |
+| SYNC-04 | Phase 1 | Pending |
+| INFRA-01 | Phase 1 | Pending |
+| INFRA-02 | Phase 1 | Pending |
+| INFRA-03 | Phase 1 | Pending |
+| INFRA-07 | Phase 1 | Pending |
+| FTS-01 | Phase 2 | Pending |
+| FTS-02 | Phase 2 | Pending |
+| FTS-03 | Phase 2 | Pending |
+| CLI-02 | Phase 2 | Pending |
+| CLI-03 | Phase 2 | Pending |
+| CLI-04 | Phase 2 | Pending |
+| CLI-05 | Phase 2 | Pending |
+| CLI-06 | Phase 2 | Pending |
+| CLI-07 | Phase 2 | Pending |
+| CLI-08 | Phase 2 | Pending |
+| CLI-09 | Phase 2 | Pending |
+| API-01 | Phase 3 | Pending |
+| API-02 | Phase 3 | Pending |
+| API-03 | Phase 3 | Pending |
+| API-04 | Phase 3 | Pending |
+| API-05 | Phase 3 | Pending |
+| API-06 | Phase 3 | Pending |
+| API-07 | Phase 3 | Pending |
+| API-08 | Phase 3 | Pending |
+| API-09 | Phase 3 | Pending |
+| API-10 | Phase 3 | Pending |
+| API-11 | Phase 3 | Pending |
+| API-12 | Phase 3 | Pending |
+| API-13 | Phase 3 | Pending |
+| API-14 | Phase 3 | Pending |
+| API-15 | Phase 3 | Pending |
+| API-16 | Phase 3 | Pending |
+| UDS-01 | Phase 3 | Pending |
+| UDS-02 | Phase 3 | Pending |
+| INFRA-04 | Phase 3 | Pending |
+| INFRA-05 | Phase 3 | Pending |
+| INFRA-06 | Phase 3 | Pending |
+| CLI-01 | Phase 3 | Pending |
+| CLI-15 | Phase 3 | Pending |
+| WATCH-01 | Phase 4 | Pending |
+| WATCH-02 | Phase 4 | Pending |
+| WATCH-03 | Phase 4 | Pending |
+| SSE-01 | Phase 4 | Pending |
+| SSE-02 | Phase 4 | Pending |
+| SSE-03 | Phase 4 | Pending |
+| SSE-04 | Phase 4 | Pending |
+| SSE-05 | Phase 4 | Pending |
+| ART-01 | Phase 5 | Pending |
+| ART-02 | Phase 5 | Pending |
+| ART-03 | Phase 5 | Pending |
+| ART-04 | Phase 5 | Pending |
+| ART-05 | Phase 5 | Pending |
+| ART-06 | Phase 5 | Pending |
+| ART-07 | Phase 5 | Pending |
+| ART-08 | Phase 5 | Pending |
+| ART-09 | Phase 5 | Pending |
+| ART-10 | Phase 5 | Pending |
+| ART-11 | Phase 5 | Pending |
+| API-17 | Phase 5 | Pending |
+| API-18 | Phase 5 | Pending |
+| API-19 | Phase 5 | Pending |
+| API-20 | Phase 5 | Pending |
+| API-21 | Phase 5 | Pending |
+| API-22 | Phase 5 | Pending |
+| API-23 | Phase 5 | Pending |
+| API-24 | Phase 5 | Pending |
+| API-25 | Phase 5 | Pending |
+| API-26 | Phase 5 | Pending |
+| API-27 | Phase 5 | Pending |
+| CLI-10 | Phase 5 | Pending |
+| CLI-11 | Phase 5 | Pending |
+| CLI-12 | Phase 5 | Pending |
+| CLI-13 | Phase 5 | Pending |
+| CLI-14 | Phase 5 | Pending |
+| SSE-06 | Phase 5 | Pending |
+| SSE-07 | Phase 5 | Pending |
+| VER-01 | Phase 6 | Pending |
+| VER-02 | Phase 6 | Pending |
+| VER-03 | Phase 6 | Pending |
+| VER-04 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 78 total
-- Mapped to phases: 0
-- Unmapped: 78
+- v1 requirements: 102 total
+- Mapped to phases: 102
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-20*
-*Last updated: 2026-02-20 after initial definition*
+*Last updated: 2026-02-20 after roadmap creation -- traceability table populated, requirement count corrected from 78 to 102*
