@@ -110,7 +110,7 @@ Plans:
 - [x] 05-04-PLAN.md — Artifact queries: list files, reconstruction via edit replay, unified diffs
 - [x] 05-05-PLAN.md — FTS5 file_operations index: rebuild and search functions
 - [x] 05-06-PLAN.md — HTTP API handlers: files, git, artifacts (11 new endpoints)
-- [ ] 05-07-PLAN.md — CLI subcommands: files, file-history, reconstruct, git-log, artifacts
+- [x] 05-07-PLAN.md — CLI subcommands: files, file-history, reconstruct, git-log, artifacts
 - [ ] 05-08-PLAN.md — SSE events (file:written, file:edited, git:commit) and watcher integration
 
 ### Phase 6: Version Monitoring
