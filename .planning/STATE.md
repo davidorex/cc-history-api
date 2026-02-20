@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 4 - Real-Time Ingestion and Events -- IN PROGRESS
+**Current focus:** Phase 4 - Real-Time Ingestion and Events -- COMPLETE
 
 ## Current Position
 
-Phase: 4 of 6 (Real-Time Ingestion and Events) -- IN PROGRESS
-Plan: 1 of 2 complete in current phase
-Status: Plan 01 (SSE Event Infrastructure) complete. Plan 02 (File Watcher) ready for execution.
-Last activity: 2026-02-20 -- Completed 04-01-PLAN.md (SSE event types, broadcast channel, GET /v1/events endpoint)
+Phase: 4 of 6 (Real-Time Ingestion and Events) -- COMPLETE
+Plan: 2 of 2 complete in current phase
+Status: Phase 4 complete. All plans executed. Ready for Phase 5.
+Last activity: 2026-02-20 -- Completed 04-02-PLAN.md (File watcher with live ingestion and SSE event emission)
 
-Progress: [████████░░] ~71% (14 of ~21 total plans)
+Progress: [████████░░] ~76% (15 of ~21 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 14
-- Average duration: ~6.2 min
-- Total execution time: ~1.45 hours
+- Total plans completed: 15
+- Average duration: ~6.0 min
+- Total execution time: ~1.5 hours
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: [████████░░] ~71% (14 of ~21 total plans)
 | 01 | 4/4 | 28 min | 7 min |
 | 02 | 3/3 | 22 min | 7.3 min |
 | 03 | 6/6 | ~30 min | ~5 min |
-| 04 | 1/2 | 3 min | 3 min |
+| 04 | 2/2 | 8 min | 4 min |
 
 **Recent Trend:**
-- Last 5 plans: 5, 5, 5, 4, 3 min
-- Trend: 04-01 SSE infrastructure completed in 3 min — 1 deviation (commit boundary shift for compile coherence)
+- Last 5 plans: 5, 5, 4, 3, 5 min
+- Trend: 04-02 File watcher completed in 5 min — 1 deviation (clap env attribute blocker fix)
 
 *Updated after each plan completion*
 
@@ -85,6 +85,9 @@ Recent decisions affecting current work:
 - [04-01]: SseEvent uses manual event_type()/to_json_data() methods instead of serde tag/content — SSE event name set via axum Event::event(), data payload is flat JSON without enum wrapper
 - [04-01]: Broadcast channel capacity 1024 — aims for ~100 seconds buffer at 10 events/second, tunable later
 - [04-01]: Lagged errors silently dropped via filter_map — slow SSE clients lose events gracefully rather than blocking producers
+- [04-02]: Removed clap env attribute for projects_dir — derive feature alone does not include env support; handled via resolve_projects_dir with explicit CLAUDE_PROJECTS_DIR env check
+- [04-02]: Watcher startup failure logs warning and continues — live ingestion is optional for basic daemon operation
+- [04-02]: Oneshot channel propagates watcher setup errors from spawned thread back to caller
 
 ### Pending Todos
 
@@ -97,5 +100,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 4 Plan 01 complete, Plan 02 ready for execution
-Resume file: /gsd:execute-phase 4
+Stopped at: Phase 4 complete, ready for Phase 5 planning
+Resume file: /gsd:plan-phase 5
