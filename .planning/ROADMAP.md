@@ -104,7 +104,7 @@ Plans:
 **Plans**: 8 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — Migration 003 (files, file_operations, git_operations tables + FTS5) and workspace deps
+- [x] 05-01-PLAN.md — Migration 003 (files, file_operations, git_operations tables + FTS5) and workspace deps
 - [ ] 05-02-PLAN.md — Artifact decomposer: Write/Edit/Read/Bash parsing into artifact tables
 - [ ] 05-03-PLAN.md — Tool result matching (ART-04) and retroactive artifact decomposition
 - [ ] 05-04-PLAN.md — Artifact queries: list files, reconstruction via edit replay, unified diffs
@@ -138,5 +138,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
-| 5. Artifact Layer | 0/8 | Not started | - |
+| 5. Artifact Layer | 1/8 | In progress | - |
 | 6. Version Monitoring | 0/1 | Not started | - |
