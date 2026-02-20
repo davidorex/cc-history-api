@@ -1,0 +1,26 @@
+{
+  "plan_path": ".planning/phases/05-artifact-layer/05-06-PLAN.md",
+  "plan_name": "Artifact API Handlers",
+  "phase": "05-artifact-layer",
+  "plan_prefix": "05-06",
+  "status": "complete",
+  "tasks": [
+    {
+      "name": "Task 1: Create files.rs, git.rs, artifacts.rs API handler modules",
+      "status": "complete",
+      "commit_hash": "37cea6e",
+      "commit_type": "feat",
+      "notes": "Created 3 handler modules with 11 total handlers. files.rs: 6 handlers (list_files, file_detail, file_content, file_diff, search_files, query_files). git.rs: 3 handlers (list_git, git_commits, session_git_commits). artifacts_api.rs: 2 handlers (session_artifacts, session_timeline). Added glob dependency to server Cargo.toml for file query pattern matching. Named artifacts_api.rs following existing export_api.rs naming convention."
+    },
+    {
+      "name": "Task 2: Register 11 new routes in build_router and update mod.rs",
+      "status": "complete",
+      "commit_hash": "530b324",
+      "commit_type": "feat",
+      "notes": "Added module declarations for artifacts_api, files, git. Registered 11 new routes bringing total from 17 to 28. Route ordering prevents path parameter conflicts: /v1/files/search and /v1/files/query before /v1/files/{file_id}, /v1/git/commits before /v1/git/commits/{session_id}. Updated doc comments to reflect 28 endpoints across 11 groups."
+    }
+  ],
+  "decisions": [],
+  "issues_logged": [],
+  "deviations": []
+}
