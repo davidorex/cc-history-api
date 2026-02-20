@@ -69,7 +69,7 @@ Plans:
 **Plans**: 6 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — Foundation: workspace deps, AppState, ApiError, and 7 new store query functions
+- [x] 03-01-PLAN.md — Foundation: workspace deps, AppState, ApiError, and 7 new store query functions
 - [ ] 03-02-PLAN.md — API handlers: health, sessions, messages, search (10 endpoints)
 - [ ] 03-03-PLAN.md — API handlers: analytics, export, schema (6 endpoints) + complete router
 - [ ] 03-04-PLAN.md — Dual-listener serve: TCP + Unix domain socket with graceful shutdown
@@ -131,7 +131,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 |-------|----------------|--------|-----------|
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
-| 3. HTTP API and Daemon | 0/6 | Not started | - |
+| 3. HTTP API and Daemon | 1/6 | In progress | - |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
 | 5. Artifact Layer | 0/3 | Not started | - |
 | 6. Version Monitoring | 0/1 | Not started | - |

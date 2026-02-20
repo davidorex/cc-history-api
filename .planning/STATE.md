@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 
 ## Current Position
 
-Phase: 3 of 6 (HTTP API and Daemon) — PLANNED
-Plan: 0 of 6 complete in current phase — planning finalized, ready for execution
-Status: Phase 3 planned. 6 plans in 6 sequential waves. axum 0.8 HTTP API + dual TCP/UDS listeners + DaemonClient for CLI-over-daemon routing.
-Last activity: 2026-02-20 -- Phase 3 planning complete (research, plan, verify, generate)
+Phase: 3 of 6 (HTTP API and Daemon) — IN PROGRESS
+Plan: 1 of 6 complete in current phase — foundation (deps, types, queries) done
+Status: Plan 03-01 complete. AppState, ApiError, and 7 store query functions ready. Plan 03-02 next (API handlers).
+Last activity: 2026-02-20 -- Plan 03-01 executed (workspace deps, AppState, ApiError, 7 query functions)
 
-Progress: [█████░░░░░] ~47% (7 of ~19 total plans)
+Progress: [█████░░░░░] ~42% (8 of ~19 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 7
-- Average duration: 7 min
-- Total execution time: 0.8 hours
+- Total plans completed: 8
+- Average duration: ~7 min
+- Total execution time: ~0.9 hours
 
 **By Phase:**
 
@@ -29,10 +29,11 @@ Progress: [█████░░░░░] ~47% (7 of ~19 total plans)
 |-------|-------|-------|----------|
 | 01 | 4/4 | 28 min | 7 min |
 | 02 | 3/3 | 22 min | 7.3 min |
+| 03 | 1/6 | ~5 min | ~5 min |
 
 **Recent Trend:**
-- Last 5 plans: 5, 10, 4, 12, 6 min
-- Trend: 02-03 was straightforward — query functions pre-built in 02-02, csv dep pre-staged
+- Last 5 plans: 10, 4, 12, 6, 5 min
+- Trend: 03-01 was fast — deps + types + query functions, no integration complexity yet
 
 *Updated after each plan completion*
 
@@ -67,6 +68,9 @@ Recent decisions affecting current work:
 - [02-03]: Export functions use tokio_rusqlite::rusqlite::Connection re-export — server crate does not depend on rusqlite directly
 - [02-03]: Export writes to Vec<u8> buffer inside conn.call, flushed to stdout outside — avoids blocking DB thread with I/O
 - [02-03]: SchemaDrift record_type filter applied in Rust post-retrieval — keeps query.rs simple
+- [03-01]: rusqlite accessed via tokio_rusqlite::rusqlite re-export in server crate (per decision [02-03]), avoiding direct rusqlite dependency
+- [03-01]: tokio_rusqlite::Error variant is Error(E) not Rusqlite — plan pseudocode adjusted at implementation time
+- [03-01]: tokio_rusqlite::Error is #[non_exhaustive], requiring wildcard catch-all arm in match
 
 ### Pending Todos
 
@@ -79,5 +83,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 3 planning complete, ready for execution
-Resume file: .planning/phases/03-http-api-and-daemon/03-01-PLAN.md (first plan)
+Stopped at: Plan 03-01 complete, ready for 03-02
+Resume file: .planning/phases/03-http-api-and-daemon/03-02-PLAN.md (next plan)
