@@ -135,7 +135,11 @@ pub fn parse_jsonl(path: &Path, from_offset: u64) -> Result<ParseResult, ParseEr
                     "Malformed JSONL line"
                 );
                 let preview = if line.len() > 500 {
-                    line[..500].to_string()
+                    let mut end = 500;
+                    while !line.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    line[..end].to_string()
                 } else {
                     line.clone()
                 };

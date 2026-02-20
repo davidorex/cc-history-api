@@ -568,7 +568,13 @@ pub fn query_session_artifacts(
             let result_content: Option<String> = row.get(3)?;
             let result_summary = result_content.map(|rc| {
                 if rc.len() > 500 {
-                    format!("{}...", &rc[..500])
+                    // Find a char boundary at or before byte 500 to avoid
+                    // panicking on multi-byte UTF-8 sequences (e.g. '→')
+                    let mut end = 500;
+                    while !rc.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &rc[..end])
                 } else {
                     rc
                 }
