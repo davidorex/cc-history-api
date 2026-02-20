@@ -4,9 +4,11 @@
 //! search) and a `build_router` function that assembles all routes into an
 //! axum Router with shared application state.
 
+pub mod analytics;
 pub mod error;
 pub mod health;
 pub mod messages;
+pub mod schema;
 pub mod search;
 pub mod sessions;
 
