@@ -1,7 +1,7 @@
-//! Query builder functions for all CLI subcommands.
+//! Query builder functions for CLI subcommands and HTTP API handlers.
 //!
 //! Each function takes a `&rusqlite::Connection` and returns
-//! `Result<Vec<T>, rusqlite::Error>` with Serialize+Debug result structs.
+//! `Result<T, rusqlite::Error>` with Serialize+Debug result structs.
 //! Results are collected inside the conn scope and returned to the caller
 //! for formatting — no println or I/O inside DB operations.
 //!
@@ -9,9 +9,11 @@
 //! `rusqlite::params_from_iter` for dynamic WHERE clauses. No user-provided
 //! values are interpolated directly into SQL strings.
 //!
-//! Requirement IDs: CLI-03, CLI-04, CLI-06, CLI-07, CLI-08, CLI-09
+//! Requirement IDs: CLI-03, CLI-04, CLI-06, CLI-07, CLI-08, CLI-09,
+//!                  API-03, API-04, API-05, API-06, API-07, API-09
 
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -84,6 +86,73 @@ pub struct DriftEntry {
     pub sample_value: Option<String>,
     pub first_seen_at: String,
     pub source_context: Option<String>,
+}
+
+/// Detailed session information for the API `GET /sessions/:id` endpoint.
+#[derive(Debug, Serialize)]
+pub struct SessionDetail {
+    pub session_id: String,
+    pub project_path: Option<String>,
+    pub first_seen_at: Option<String>,
+    pub last_seen_at: Option<String>,
+    pub version: Option<String>,
+    pub slug: Option<String>,
+    pub git_branch: Option<String>,
+    pub message_count: i64,
+    pub primary_model: Option<String>,
+}
+
+/// A message in a session conversation with content blocks and token usage.
+/// Used by the API `GET /sessions/:id/conversation` endpoint.
+#[derive(Debug, Serialize)]
+pub struct ConversationMessage {
+    pub uuid: String,
+    pub session_id: String,
+    pub message_type: String,
+    pub timestamp: String,
+    pub model: Option<String>,
+    pub parent_uuid: Option<String>,
+    pub is_sidechain: bool,
+    pub content_blocks: Vec<ExportContentBlock>,
+    pub token_usage: Option<ExportTokenUsage>,
+}
+
+/// A node in the session message tree showing parent-child relationships.
+/// Used by the API `GET /sessions/:id/tree` endpoint.
+#[derive(Debug, Serialize)]
+pub struct TreeNode {
+    pub uuid: String,
+    pub parent_uuid: Option<String>,
+    pub is_sidechain: bool,
+    pub message_type: String,
+    pub timestamp: String,
+    pub model: Option<String>,
+    pub children_count: i64,
+}
+
+/// An agent entry from the agents table.
+/// Used by the API `GET /sessions/:id/agents` endpoint.
+#[derive(Debug, Serialize)]
+pub struct AgentEntry {
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub first_seen_at: Option<String>,
+    pub last_seen_at: Option<String>,
+}
+
+/// Aggregated summary statistics for a session.
+/// Used by the API `GET /sessions/:id/summary` endpoint.
+#[derive(Debug, Serialize)]
+pub struct SessionSummaryStats {
+    pub session_id: String,
+    pub message_count: i64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub tool_use_count: i64,
+    pub unique_tools: i64,
+    pub first_timestamp: Option<String>,
+    pub last_timestamp: Option<String>,
+    pub duration_seconds: Option<i64>,
 }
 
 /// A message with content blocks and token usage for export.
@@ -591,4 +660,410 @@ pub fn session_messages_for_export(
     }
 
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// API query functions (Plan 03-01)
+// ---------------------------------------------------------------------------
+
+/// Get detailed information about a single session.
+///
+/// [API-03] Returns session metadata with message count and primary model.
+/// Returns None if the session_id does not exist.
+pub fn get_session(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<SessionDetail>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            s.session_id,
+            s.project_path,
+            s.first_seen_at,
+            s.last_seen_at,
+            s.version,
+            s.slug,
+            s.git_branch,
+            COUNT(m.uuid) AS message_count,
+            (SELECT model FROM messages
+             WHERE session_id = s.session_id AND model IS NOT NULL
+             LIMIT 1) AS primary_model
+         FROM sessions s
+         LEFT JOIN messages m ON m.session_id = s.session_id
+         WHERE s.session_id = ?1
+         GROUP BY s.session_id",
+    )?;
+
+    let result = stmt
+        .query_row(rusqlite::params![session_id], |row| {
+            Ok(SessionDetail {
+                session_id: row.get(0)?,
+                project_path: row.get(1)?,
+                first_seen_at: row.get(2)?,
+                last_seen_at: row.get(3)?,
+                version: row.get(4)?,
+                slug: row.get(5)?,
+                git_branch: row.get(6)?,
+                message_count: row.get(7)?,
+                primary_model: row.get(8)?,
+            })
+        })
+        .optional()?;
+
+    Ok(result)
+}
+
+/// Get messages in a session as a conversation, with content blocks and token usage.
+///
+/// [API-04] Returns messages ordered by timestamp ascending with LIMIT/OFFSET
+/// pagination. Content blocks can be filtered: if `include_thinking` is false,
+/// blocks with block_type "thinking" are excluded; if `include_tool_io` is false,
+/// blocks with block_type "tool_use" or "tool_result" are excluded.
+pub fn session_conversation(
+    conn: &Connection,
+    session_id: &str,
+    include_thinking: bool,
+    include_tool_io: bool,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<ConversationMessage>, rusqlite::Error> {
+    // 1. Load messages for this session
+    let mut msg_stmt = conn.prepare(
+        "SELECT uuid, session_id, type, timestamp, model, parent_uuid, is_sidechain
+         FROM messages
+         WHERE session_id = ?1
+         ORDER BY timestamp ASC
+         LIMIT ?2 OFFSET ?3",
+    )?;
+
+    let messages: Vec<(String, String, String, String, Option<String>, Option<String>, i32)> =
+        msg_stmt
+            .query_map(
+                rusqlite::params![session_id, limit as i64, offset as i64],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get::<_, i32>(6)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+    // 2. For each message, load content blocks and token usage
+    let mut content_stmt = conn.prepare(
+        "SELECT block_index, block_type, text_content, tool_use_id, tool_name, tool_input, is_error
+         FROM message_content
+         WHERE message_uuid = ?1
+         ORDER BY block_index ASC",
+    )?;
+
+    let mut usage_stmt = conn.prepare(
+        "SELECT input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+         FROM token_usage
+         WHERE message_uuid = ?1",
+    )?;
+
+    let mut result = Vec::with_capacity(messages.len());
+
+    for (uuid, sid, mtype, ts, model, parent_uuid, is_sidechain_int) in messages {
+        // Load content blocks with optional filtering
+        let all_blocks: Vec<ExportContentBlock> = content_stmt
+            .query_map(rusqlite::params![&uuid], |row| {
+                Ok(ExportContentBlock {
+                    block_index: row.get(0)?,
+                    block_type: row.get(1)?,
+                    text_content: row.get(2)?,
+                    tool_use_id: row.get(3)?,
+                    tool_name: row.get(4)?,
+                    tool_input: row.get(5)?,
+                    is_error: row.get::<_, Option<i32>>(6)?.map(|v| v != 0),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let blocks: Vec<ExportContentBlock> = all_blocks
+            .into_iter()
+            .filter(|b| {
+                if !include_thinking && b.block_type == "thinking" {
+                    return false;
+                }
+                if !include_tool_io
+                    && (b.block_type == "tool_use" || b.block_type == "tool_result")
+                {
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        // Load token usage (may not exist for non-assistant messages)
+        let usage: Option<ExportTokenUsage> = usage_stmt
+            .query_row(rusqlite::params![&uuid], |row| {
+                Ok(ExportTokenUsage {
+                    input_tokens: row.get(0)?,
+                    output_tokens: row.get(1)?,
+                    cache_creation_input_tokens: row.get(2)?,
+                    cache_read_input_tokens: row.get(3)?,
+                })
+            })
+            .ok();
+
+        result.push(ConversationMessage {
+            uuid,
+            session_id: sid,
+            message_type: mtype,
+            timestamp: ts,
+            model,
+            parent_uuid,
+            is_sidechain: is_sidechain_int != 0,
+            content_blocks: blocks,
+            token_usage: usage,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Get the message tree structure for a session.
+///
+/// [API-06] Returns all messages in the session with parent_uuid, is_sidechain,
+/// and a count of direct children. This supports rendering conversation trees
+/// without loading full content blocks.
+pub fn session_tree(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<TreeNode>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            m.uuid,
+            m.parent_uuid,
+            m.is_sidechain,
+            m.type,
+            m.timestamp,
+            m.model,
+            (SELECT COUNT(*) FROM messages c WHERE c.parent_uuid = m.uuid) AS children_count
+         FROM messages m
+         WHERE m.session_id = ?1
+         ORDER BY m.timestamp ASC",
+    )?;
+
+    let results = stmt.query_map(rusqlite::params![session_id], |row| {
+        Ok(TreeNode {
+            uuid: row.get(0)?,
+            parent_uuid: row.get(1)?,
+            is_sidechain: row.get::<_, i32>(2)? != 0,
+            message_type: row.get(3)?,
+            timestamp: row.get(4)?,
+            model: row.get(5)?,
+            children_count: row.get(6)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// Get agents associated with a session.
+///
+/// [API-07] Returns all agent entries for the given session_id, ordered by
+/// first_seen_at ascending.
+pub fn session_agents(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<AgentEntry>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, session_id, first_seen_at, last_seen_at
+         FROM agents
+         WHERE session_id = ?1
+         ORDER BY first_seen_at ASC",
+    )?;
+
+    let results = stmt.query_map(rusqlite::params![session_id], |row| {
+        Ok(AgentEntry {
+            agent_id: row.get(0)?,
+            session_id: row.get(1)?,
+            first_seen_at: row.get(2)?,
+            last_seen_at: row.get(3)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// Get aggregated summary statistics for a session.
+///
+/// [API-05] Returns message count, total tokens, tool use statistics,
+/// timestamp range, and computed duration. Returns None if the session
+/// has no messages.
+pub fn session_summary(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<SessionSummaryStats>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            m.session_id,
+            COUNT(m.uuid) AS message_count,
+            COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
+            COALESCE(SUM(tu.output_tokens), 0) AS total_output_tokens,
+            (SELECT COUNT(*) FROM tool_executions te
+             JOIN messages m2 ON m2.uuid = te.message_uuid
+             WHERE m2.session_id = ?1) AS tool_use_count,
+            (SELECT COUNT(DISTINCT te2.tool_name) FROM tool_executions te2
+             JOIN messages m3 ON m3.uuid = te2.message_uuid
+             WHERE m3.session_id = ?1) AS unique_tools,
+            MIN(m.timestamp) AS first_timestamp,
+            MAX(m.timestamp) AS last_timestamp,
+            CASE
+                WHEN MIN(m.timestamp) IS NOT NULL AND MAX(m.timestamp) IS NOT NULL
+                THEN CAST(
+                    (julianday(MAX(m.timestamp)) - julianday(MIN(m.timestamp))) * 86400
+                    AS INTEGER
+                )
+                ELSE NULL
+            END AS duration_seconds
+         FROM messages m
+         LEFT JOIN token_usage tu ON tu.message_uuid = m.uuid
+         WHERE m.session_id = ?1
+         GROUP BY m.session_id",
+    )?;
+
+    let result = stmt
+        .query_row(rusqlite::params![session_id], |row| {
+            Ok(SessionSummaryStats {
+                session_id: row.get(0)?,
+                message_count: row.get(1)?,
+                total_input_tokens: row.get(2)?,
+                total_output_tokens: row.get(3)?,
+                tool_use_count: row.get(4)?,
+                unique_tools: row.get(5)?,
+                first_timestamp: row.get(6)?,
+                last_timestamp: row.get(7)?,
+                duration_seconds: row.get(8)?,
+            })
+        })
+        .optional()?;
+
+    Ok(result)
+}
+
+/// Get a single message by UUID with its content blocks and token usage.
+///
+/// [API-09] Reuses the ExportMessage struct. Returns None if the UUID
+/// does not exist. Loads content blocks and token usage using the same
+/// pattern as session_messages_for_export but for a single message.
+pub fn get_message(
+    conn: &Connection,
+    uuid: &str,
+) -> Result<Option<ExportMessage>, rusqlite::Error> {
+    // Load the message row
+    let msg = conn
+        .query_row(
+            "SELECT uuid, session_id, type, timestamp, model, stop_reason
+             FROM messages
+             WHERE uuid = ?1",
+            rusqlite::params![uuid],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let (msg_uuid, session_id, message_type, timestamp, model, stop_reason) = match msg {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    // Load content blocks
+    let mut content_stmt = conn.prepare(
+        "SELECT block_index, block_type, text_content, tool_use_id, tool_name, tool_input, is_error
+         FROM message_content
+         WHERE message_uuid = ?1
+         ORDER BY block_index ASC",
+    )?;
+
+    let blocks: Vec<ExportContentBlock> = content_stmt
+        .query_map(rusqlite::params![&msg_uuid], |row| {
+            Ok(ExportContentBlock {
+                block_index: row.get(0)?,
+                block_type: row.get(1)?,
+                text_content: row.get(2)?,
+                tool_use_id: row.get(3)?,
+                tool_name: row.get(4)?,
+                tool_input: row.get(5)?,
+                is_error: row.get::<_, Option<i32>>(6)?.map(|v| v != 0),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Load token usage
+    let usage: Option<ExportTokenUsage> = conn
+        .query_row(
+            "SELECT input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+             FROM token_usage
+             WHERE message_uuid = ?1",
+            rusqlite::params![&msg_uuid],
+            |row| {
+                Ok(ExportTokenUsage {
+                    input_tokens: row.get(0)?,
+                    output_tokens: row.get(1)?,
+                    cache_creation_input_tokens: row.get(2)?,
+                    cache_read_input_tokens: row.get(3)?,
+                })
+            },
+        )
+        .ok();
+
+    Ok(Some(ExportMessage {
+        uuid: msg_uuid,
+        session_id,
+        message_type,
+        timestamp,
+        model,
+        stop_reason,
+        content_blocks: blocks,
+        token_usage: usage,
+    }))
+}
+
+/// Token statistics aggregated by day (DATE of message timestamp).
+///
+/// [API-09] Reuses the TokenStats struct with group_key set to the date
+/// string (YYYY-MM-DD). Returns one row per day, ordered by date descending.
+pub fn token_stats_by_day(conn: &Connection) -> Result<Vec<TokenStats>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            DATE(m.timestamp) AS day,
+            COUNT(*) AS message_count,
+            COALESCE(SUM(tu.input_tokens), 0) AS total_input,
+            COALESCE(SUM(tu.output_tokens), 0) AS total_output,
+            SUM(tu.cache_read_input_tokens) AS total_cache_read,
+            SUM(tu.cache_creation_input_tokens) AS total_cache_creation
+         FROM token_usage tu
+         JOIN messages m ON m.uuid = tu.message_uuid
+         GROUP BY DATE(m.timestamp)
+         ORDER BY day DESC",
+    )?;
+
+    let results = stmt.query_map([], |row| {
+        Ok(TokenStats {
+            group_key: row.get(0)?,
+            message_count: row.get(1)?,
+            total_input_tokens: row.get(2)?,
+            total_output_tokens: row.get(3)?,
+            total_cache_read: row.get(4)?,
+            total_cache_creation: row.get(5)?,
+        })
+    })?;
+
+    results.collect()
 }
