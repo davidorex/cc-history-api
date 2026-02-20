@@ -30,6 +30,7 @@ use tracing_subscriber::EnvFilter;
 
 mod api;
 pub mod daemon_client;
+pub mod events;
 mod export;
 mod output;
 mod serve;
@@ -405,11 +406,18 @@ async fn run_serve(
         }
     };
 
-    // Build shared application state
+    // Build shared application state.
+    // The broadcast channel capacity of 1024 provides ~100 seconds of buffer at
+    // 10 events/second. The initial receiver (_rx) is immediately dropped — it
+    // exists only to satisfy channel construction. Each SSE client handler creates
+    // its own Receiver via event_tx.subscribe().
+    let (event_tx, _rx) = tokio::sync::broadcast::channel::<crate::events::SseEvent>(1024);
+
     let state = Arc::new(state::AppState {
         conn,
         version: env!("CARGO_PKG_VERSION").to_string(),
         db_path: db_path.clone(),
+        event_tx,
     });
 
     // Resolve socket path: --socket arg > $CLAUDE_HISTORY_SOCKET > default

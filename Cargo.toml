@@ -23,3 +23,6 @@ uuid = { version = "1", features = ["v4"] }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+notify = { version = "8.2", features = ["macos_fsevent"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"

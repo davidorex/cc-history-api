@@ -8,6 +8,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::sync::broadcast;
+
+use crate::events::SseEvent;
+
 /// Shared application state passed to every axum handler via Extension or State.
 ///
 /// The `conn` field is a `tokio_rusqlite::Connection`, the same async wrapper
@@ -22,6 +26,15 @@ pub struct AppState {
 
     /// Path to the SQLite database file on disk.
     pub db_path: PathBuf,
+
+    /// Broadcast sender for SSE events.
+    ///
+    /// Clone this sender and call `.subscribe()` to obtain a new Receiver in
+    /// each SSE handler invocation. The channel supports fan-out to multiple
+    /// concurrent SSE clients. The capacity is set at construction time (1024
+    /// in main.rs) — slow consumers that fall behind will experience lagged
+    /// errors handled gracefully by the SSE handler.
+    pub event_tx: broadcast::Sender<SseEvent>,
 }
 
 /// Type alias for the Arc-wrapped AppState used in handler signatures.
