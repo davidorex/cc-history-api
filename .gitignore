@@ -1,1 +1,26 @@
+# Rust build artifacts
 /target
+
+# Claude Code local state
+/.claude
+
+# SQLite database files (runtime artifacts, not source)
+*.db
+*.db-wal
+*.db-shm
+
+# Unix domain socket
+claude-history.sock
+
+# OS files
+.DS_Store
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
