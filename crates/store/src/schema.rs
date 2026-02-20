@@ -11,6 +11,7 @@ use rusqlite::Connection;
 const MIGRATIONS: &[(&str, &str)] = &[
     ("001", include_str!("../migrations/001_initial.sql")),
     ("002", include_str!("../migrations/002_fts5.sql")),
+    ("003", include_str!("../migrations/003_artifacts.sql")),
 ];
 
 /// Errors that can occur during migration application.
