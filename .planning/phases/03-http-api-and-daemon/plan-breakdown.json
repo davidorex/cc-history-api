@@ -1,0 +1,356 @@
+{
+  "phase": "03-http-api-and-daemon",
+  "phase_number": 3,
+  "phase_name": "HTTP API and Daemon",
+  "phase_goal": "Any language or process can query Claude Code history through a stable HTTP API at localhost:7424 or a Unix domain socket, with the daemon managing its own lifecycle",
+  "plans": [
+    {
+      "plan_number": 1,
+      "name": "Foundation: workspace deps, AppState, ApiError, and new store query functions",
+      "wave": 1,
+      "depends_on": [],
+      "autonomous": true,
+      "is_tdd": false,
+      "requirements": ["API-03", "API-04", "API-05", "API-06", "API-07", "API-09", "API-11"],
+      "files_modified": [
+        "Cargo.toml",
+        "crates/server/Cargo.toml",
+        "crates/store/src/query.rs",
+        "crates/server/src/state.rs",
+        "crates/server/src/api/error.rs"
+      ],
+      "must_haves": {
+        "truths": [
+          "axum 0.8, tower-http 0.6, tokio-util 0.7, and uuid 1 are declared as workspace dependencies and available in the server crate",
+          "AppState struct holds tokio_rusqlite::Connection, version string, and db_path, wrapped in Arc for handler sharing",
+          "ApiError enum maps store errors, tokio-rusqlite errors, and validation errors to HTTP status codes with JSON error bodies",
+          "7 new store query functions compile and return Serialize result structs: get_session, session_conversation, session_tree, session_agents, session_summary, get_message, token_stats_by_day"
+        ],
+        "artifacts": [
+          "Cargo.toml with axum, tower-http, tokio-util, uuid in [workspace.dependencies]",
+          "crates/server/Cargo.toml with axum, tower-http, tokio-util, uuid as workspace deps",
+          "crates/server/src/state.rs with AppState and SharedState type alias",
+          "crates/server/src/api/error.rs with ApiError implementing IntoResponse",
+          "crates/store/src/query.rs with 7 new query functions"
+        ],
+        "key_links": [
+          "AppState.conn is tokio_rusqlite::Connection -- same type used by existing CLI handlers",
+          "ApiError implements axum::response::IntoResponse for automatic HTTP error conversion",
+          "New store query functions follow existing pattern: &Connection -> Result<T, rusqlite::Error> with Serialize results"
+        ]
+      },
+      "tasks": [
+        {
+          "name": "Task 1: Add workspace dependencies and create AppState + ApiError modules",
+          "type": "auto",
+          "files": [
+            "Cargo.toml",
+            "crates/server/Cargo.toml",
+            "crates/server/src/state.rs",
+            "crates/server/src/api/error.rs",
+            "crates/server/src/api/mod.rs"
+          ],
+          "action": "Add workspace dependencies to root Cargo.toml: axum = { version = \"0.8\", features = [\"tokio\"] }, tower-http = { version = \"0.6\", features = [\"trace\"] }, tokio-util = { version = \"0.7\", features = [\"rt\"] }, uuid = { version = \"1\", features = [\"v4\"] }. Add corresponding { workspace = true } entries to crates/server/Cargo.toml. Create crates/server/src/state.rs with: AppState struct containing conn: tokio_rusqlite::Connection, version: String, db_path: PathBuf. Define type SharedState = Arc<AppState>. Create crates/server/src/api/error.rs with: ApiError enum (NotFound(String), BadRequest(String), Internal(String)) implementing axum::response::IntoResponse. Implement From<tokio_rusqlite::Error> for ApiError, mapping ConnectionClosed/Close to Internal and Rusqlite inner errors to appropriate variants (QueryReturnedNoRows -> NotFound, others -> Internal). JSON body format: { \"error\": \"message\" }. Create crates/server/src/api/mod.rs as placeholder with pub mod error; only for now (handlers added in Plan 2).",
+          "verify": "cargo check --workspace compiles successfully with new dependencies. The api/ directory exists with error.rs and mod.rs. state.rs exists with AppState struct.",
+          "done": "Workspace builds with axum 0.8, tower-http 0.6, tokio-util 0.7, uuid 1. AppState and ApiError types compile and are importable from the server crate."
+        },
+        {
+          "name": "Task 2: Implement 7 new store query functions for API endpoints",
+          "type": "auto",
+          "files": [
+            "crates/store/src/query.rs"
+          ],
+          "action": "Add 7 new query functions to crates/store/src/query.rs, following the existing pattern (parameterized SQL, Box<dyn ToSql>, Serialize result structs). New result structs needed: SessionDetail (session_id, project_path, first_seen_at, last_seen_at, version, slug, git_branch, message_count: i64, primary_model: Option<String>), ConversationMessage (uuid, session_id, message_type, timestamp, model, parent_uuid, is_sidechain, content_blocks: Vec<ExportContentBlock>, token_usage: Option<ExportTokenUsage>), TreeNode (uuid, parent_uuid: Option<String>, is_sidechain: bool, message_type, timestamp, model, children_count: i64), AgentEntry (agent_id, session_id, first_seen_at, last_seen_at), SessionSummaryStats (session_id, message_count, total_input_tokens, total_output_tokens, tool_use_count, unique_tools, first_timestamp, last_timestamp, duration_seconds: Option<i64>), MessageDetail (same fields as ExportMessage -- reuse ExportMessage). New functions: (1) get_session(conn, session_id) -> Option<SessionDetail>: SELECT from sessions with LEFT JOIN message count and primary model subquery. Return None on QueryReturnedNoRows. (2) session_conversation(conn, session_id, include_thinking: bool, include_tool_io: bool, limit, offset) -> Vec<ConversationMessage>: SELECT messages WHERE session_id, ORDER BY timestamp ASC, with LIMIT/OFFSET. For each message, load content blocks (filtering out thinking blocks if !include_thinking, filtering out tool_use/tool_result if !include_tool_io) and token_usage. Reuse the existing batch-loading pattern from session_messages_for_export. (3) session_tree(conn, session_id) -> Vec<TreeNode>: SELECT uuid, parent_uuid, is_sidechain, type, timestamp, model, (SELECT COUNT(*) FROM messages c WHERE c.parent_uuid = m.uuid) as children_count FROM messages m WHERE session_id ORDER BY timestamp. (4) session_agents(conn, session_id) -> Vec<AgentEntry>: SELECT * FROM agents WHERE session_id. (5) session_summary(conn, session_id) -> Option<SessionSummaryStats>: Aggregate query joining messages + token_usage + tool_executions for the session. COUNT messages, SUM tokens, COUNT DISTINCT tool names, MIN/MAX timestamp, compute duration_seconds as strftime difference. Return None if session has no messages. (6) get_message(conn, uuid) -> Option<ExportMessage>: Reuse ExportMessage struct. Load single message by uuid, then load its content blocks and token usage using the same pattern as session_messages_for_export but for one row. Return None on QueryReturnedNoRows. (7) token_stats_by_day(conn) -> Vec<TokenStats>: GROUP BY DATE(m.timestamp) instead of model. Use existing TokenStats struct with group_key = date string.",
+          "verify": "cargo check --workspace compiles. cargo test -p claude-history-store passes (existing tests still pass; new functions are callable).",
+          "done": "7 new public functions exist in query.rs: get_session, session_conversation, session_tree, session_agents, session_summary, get_message, token_stats_by_day. All return Result types with Serialize output structs. Existing tests still pass."
+        }
+      ],
+      "verification": [
+        "cargo check --workspace succeeds",
+        "cargo test -p claude-history-store passes",
+        "crates/server/src/state.rs exports AppState and SharedState",
+        "crates/server/src/api/error.rs exports ApiError with IntoResponse impl"
+      ],
+      "success_criteria": [
+        "Workspace compiles with axum 0.8, tower-http 0.6, tokio-util 0.7, uuid 1",
+        "AppState struct holds Connection, version, db_path",
+        "ApiError maps tokio_rusqlite::Error and rusqlite::Error to HTTP status codes",
+        "7 new store query functions are public, compile, and return Serialize types"
+      ]
+    },
+    {
+      "plan_number": 2,
+      "name": "API handlers and router: all 16 HTTP endpoints",
+      "wave": 2,
+      "depends_on": ["03-01"],
+      "autonomous": true,
+      "is_tdd": false,
+      "requirements": ["API-01", "API-02", "API-03", "API-04", "API-05", "API-06", "API-07", "API-08", "API-09", "API-10"],
+      "files_modified": [
+        "crates/server/src/api/mod.rs",
+        "crates/server/src/api/health.rs",
+        "crates/server/src/api/sessions.rs",
+        "crates/server/src/api/messages.rs",
+        "crates/server/src/api/search.rs"
+      ],
+      "must_haves": {
+        "truths": [
+          "GET /v1/health returns JSON with status, db_size, record_count, version fields",
+          "GET /v1/sessions returns filtered session list matching store::query::list_sessions output",
+          "GET /v1/sessions/:id returns single session detail or 404",
+          "GET /v1/sessions/:id/conversation returns ordered messages with optional thinking/tool_io filtering",
+          "GET /v1/sessions/:id/tree returns flat message list with parent_uuid and is_sidechain for tree construction",
+          "GET /v1/sessions/:id/agents returns agent hierarchy for the session",
+          "GET /v1/sessions/:id/summary returns aggregated session statistics",
+          "POST /v1/messages/query accepts JSON body and returns filtered messages via parameterized SQL",
+          "GET /v1/messages/:uuid returns single message detail or 404",
+          "GET /v1/search?q= returns FTS5 ranked search results"
+        ],
+        "artifacts": [
+          "crates/server/src/api/health.rs with health handler",
+          "crates/server/src/api/sessions.rs with list, detail, conversation, tree, agents, summary handlers",
+          "crates/server/src/api/messages.rs with query (POST) and by_uuid (GET) handlers",
+          "crates/server/src/api/search.rs with search handler",
+          "crates/server/src/api/mod.rs with build_router function assembling routes for these 10 endpoints"
+        ],
+        "key_links": [
+          "All handlers take State<SharedState> and call conn.call(|conn| store_function(conn, ...)).await",
+          "POST /v1/messages/query uses axum::Json<MessageQuery> extractor and compiles to existing query_messages with parameterized SQL",
+          "Session sub-resource handlers use axum::extract::Path for :id and axum::extract::Query for optional params"
+        ]
+      },
+      "tasks": [
+        {
+          "name": "Task 1: Health, sessions list/detail, and session sub-resource handlers",
+          "type": "auto",
+          "files": [
+            "crates/server/src/api/health.rs",
+            "crates/server/src/api/sessions.rs"
+          ],
+          "action": "Create crates/server/src/api/health.rs: Define HealthResponse { status: String, db_size: i64, record_count: i64, version: String }. Handler takes State<SharedState>, calls conn.call to get page_count * page_size pragma for db_size and COUNT(*) from messages for record_count. Returns Json<HealthResponse>. Create crates/server/src/api/sessions.rs: (1) list handler: Deserialize SessionsParams { project, after, before, limit } via Query extractor. Call store::query::list_sessions. Return Json<Vec<SessionSummary>>. (2) detail handler: Path<String> for session_id. Call store::query::get_session. Map None to ApiError::NotFound. Return Json<SessionDetail>. (3) conversation handler: Path<String> + Query<ConversationParams> { include_thinking: Option<bool>, include_tool_io: Option<bool>, limit: Option<usize>, offset: Option<usize> }. Call store::query::session_conversation with defaults (false, false, 100, 0). Return Json<Vec<ConversationMessage>>. (4) tree handler: Path<String>. Call store::query::session_tree. Return Json<Vec<TreeNode>>. (5) agents handler: Path<String>. Call store::query::session_agents. Return Json<Vec<AgentEntry>>. (6) summary handler: Path<String>. Call store::query::session_summary. Map None to ApiError::NotFound. Return Json<SessionSummaryStats>.",
+          "verify": "cargo check --workspace compiles. Handler function signatures are correct axum handler types (return impl IntoResponse).",
+          "done": "health.rs has 1 handler, sessions.rs has 6 handlers. All compile as valid axum handlers with State, Path, and Query extractors."
+        },
+        {
+          "name": "Task 2: Messages, search handlers, and partial router construction",
+          "type": "auto",
+          "files": [
+            "crates/server/src/api/messages.rs",
+            "crates/server/src/api/search.rs",
+            "crates/server/src/api/mod.rs"
+          ],
+          "action": "Create crates/server/src/api/messages.rs: (1) query handler (POST): Define MessageQuery { session_id, message_type, model, tool, after, before, limit } with Deserialize. Takes Json<MessageQuery> + State<SharedState>. Calls store::query::query_messages with all fields. Return Json<Vec<MessageResult>>. (2) by_uuid handler (GET): Path<String> for uuid. Calls store::query::get_message. Map None to NotFound. Return Json<ExportMessage>. Create crates/server/src/api/search.rs: Define SearchParams { q: String, limit: Option<usize> with default 20, offset: Option<usize> with default 0 } with Deserialize. Handler takes Query<SearchParams> + State<SharedState>. Calls store::fts::search_messages. Return Json<Vec<SearchResult>>. Update crates/server/src/api/mod.rs: Add pub mod health, sessions, messages, search. Create build_router(state: SharedState) -> Router function. Register all 10 routes: /v1/health (GET), /v1/sessions (GET), /v1/sessions/:id (GET), /v1/sessions/:id/conversation (GET), /v1/sessions/:id/tree (GET), /v1/sessions/:id/agents (GET), /v1/sessions/:id/summary (GET), /v1/messages/query (POST), /v1/messages/:uuid (GET), /v1/search (GET). Call .with_state(state). Note: analytics, export, schema handlers are added in Plan 3 -- leave placeholder comments in mod.rs for those route groups.",
+          "verify": "cargo check --workspace compiles. build_router function exists and returns Router. All 10 routes are registered.",
+          "done": "messages.rs has 2 handlers (query POST, by_uuid GET). search.rs has 1 handler. mod.rs has build_router with 10 routes registered and placeholder comments for the remaining 6 endpoints."
+        }
+      ],
+      "verification": [
+        "cargo check --workspace succeeds",
+        "build_router function exists in api/mod.rs and compiles",
+        "10 handler functions have correct axum signatures"
+      ],
+      "success_criteria": [
+        "All 10 endpoint handlers compile as valid axum handlers",
+        "build_router registers /v1/health, /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/conversation, /v1/sessions/:id/tree, /v1/sessions/:id/agents, /v1/sessions/:id/summary, /v1/messages/query, /v1/messages/:uuid, /v1/search",
+        "POST /v1/messages/query deserializes JSON body and calls parameterized query_messages"
+      ]
+    },
+    {
+      "plan_number": 3,
+      "name": "Analytics, export, and schema API handlers: remaining 6 endpoints",
+      "wave": 3,
+      "depends_on": ["03-02"],
+      "autonomous": true,
+      "is_tdd": false,
+      "requirements": ["API-11", "API-12", "API-13", "API-14", "API-15", "API-16"],
+      "files_modified": [
+        "crates/server/src/api/analytics.rs",
+        "crates/server/src/api/export_api.rs",
+        "crates/server/src/api/schema.rs",
+        "crates/server/src/api/mod.rs"
+      ],
+      "must_haves": {
+        "truths": [
+          "GET /v1/analytics/tokens returns token stats with group_by parameter selecting session/day/model grouping",
+          "GET /v1/analytics/tools returns tool frequency and error rates",
+          "GET /v1/analytics/models returns model usage breakdown with percentages",
+          "GET /v1/export/:session_id returns full session export in requested format (json, markdown, csv)",
+          "GET /v1/schema/versions returns Claude Code version history",
+          "GET /v1/schema/drift returns schema drift log entries with optional record_type filter"
+        ],
+        "artifacts": [
+          "crates/server/src/api/analytics.rs with tokens, tools, models handlers",
+          "crates/server/src/api/export_api.rs with session export handler",
+          "crates/server/src/api/schema.rs with versions and drift handlers",
+          "crates/server/src/api/mod.rs updated with all 16 routes in build_router"
+        ],
+        "key_links": [
+          "analytics/tokens handler dispatches to token_stats_by_model, token_stats_by_session, or token_stats_by_day based on group_by query param",
+          "export handler reuses existing export::export_json/markdown/csv functions via conn.call, returning buffer as response body with appropriate Content-Type",
+          "build_router now registers all 16 API endpoints"
+        ]
+      },
+      "tasks": [
+        {
+          "name": "Task 1: Analytics and schema endpoint handlers",
+          "type": "auto",
+          "files": [
+            "crates/server/src/api/analytics.rs",
+            "crates/server/src/api/schema.rs"
+          ],
+          "action": "Create crates/server/src/api/analytics.rs: (1) tokens handler: Define TokensParams { group_by: Option<String>, session_id: Option<String> } with Deserialize. group_by accepts 'model' (default), 'session', 'day'. Dispatch to token_stats_by_model, token_stats_by_session(conn, session_id), or token_stats_by_day accordingly. Return Json<Vec<TokenStats>>. Validate group_by values and return ApiError::BadRequest for invalid values. (2) tools handler: No params. Calls store::query::tool_frequency. Returns Json<Vec<ToolStats>>. (3) models handler: No params. Calls store::query::model_breakdown. Returns Json<Vec<ModelStats>>. Create crates/server/src/api/schema.rs: (1) versions handler: No params. Calls store::query::version_history. Returns Json<Vec<VersionEntry>>. (2) drift handler: Define DriftParams { record_type: Option<String>, limit: Option<usize> } with Deserialize. Calls store::query::schema_drift_list, applies record_type filter and limit in Rust (matching existing CLI pattern from run_schema_drift). Returns Json<Vec<DriftEntry>>.",
+          "verify": "cargo check --workspace compiles. analytics.rs has 3 handlers, schema.rs has 2 handlers.",
+          "done": "5 handler functions compile with correct axum signatures. group_by dispatch logic in tokens handler covers model/session/day variants."
+        },
+        {
+          "name": "Task 2: Export API handler and complete router with all 16 routes",
+          "type": "auto",
+          "files": [
+            "crates/server/src/api/export_api.rs",
+            "crates/server/src/api/mod.rs"
+          ],
+          "action": "Create crates/server/src/api/export_api.rs: Define ExportParams { format: Option<String> } with Deserialize (default 'json'). Handler takes Path<String> for session_id + Query<ExportParams> + State<SharedState>. Validates format is one of json/markdown/csv (ApiError::BadRequest otherwise). Inside conn.call, creates Vec<u8> buffer and calls the appropriate export function (export::export_json, export_markdown, or export_csv). Returns the buffer as response body with appropriate Content-Type header: application/json for json, text/markdown for markdown, text/csv for csv. Use axum::response::Response::builder() to set Content-Type then body. Note: import the existing export module functions -- they take &rusqlite::Connection which is available inside conn.call. Update crates/server/src/api/mod.rs: Add pub mod analytics, export_api, schema. Update build_router to include all 16 routes -- add the 6 new routes: /v1/analytics/tokens (GET), /v1/analytics/tools (GET), /v1/analytics/models (GET), /v1/export/:session_id (GET), /v1/schema/versions (GET), /v1/schema/drift (GET). Remove placeholder comments. Add tower_http::trace::TraceLayer as middleware via .layer(TraceLayer::new_for_http()) for request/response logging.",
+          "verify": "cargo check --workspace compiles. build_router registers all 16 routes. Export handler sets correct Content-Type headers.",
+          "done": "export_api.rs handler compiles. mod.rs build_router registers all 16 /v1/ endpoints. TraceLayer middleware is applied."
+        }
+      ],
+      "verification": [
+        "cargo check --workspace succeeds",
+        "build_router has 16 .route() calls covering all API-01 through API-16 endpoints",
+        "Export handler returns response with Content-Type header matching format",
+        "Analytics tokens handler validates group_by parameter"
+      ],
+      "success_criteria": [
+        "All 16 API endpoint handlers exist and compile",
+        "build_router assembles the complete Router with all routes and TraceLayer middleware",
+        "Export handler reuses existing export functions and sets Content-Type",
+        "Analytics tokens handler dispatches by group_by (model, session, day)"
+      ]
+    },
+    {
+      "plan_number": 4,
+      "name": "Dual-listener serve infrastructure: TCP + Unix domain socket with graceful shutdown",
+      "wave": 4,
+      "depends_on": ["03-03"],
+      "autonomous": true,
+      "is_tdd": false,
+      "requirements": ["INFRA-04", "INFRA-05", "INFRA-06", "UDS-01", "UDS-02", "CLI-01"],
+      "files_modified": [
+        "crates/server/src/serve.rs",
+        "crates/server/src/main.rs"
+      ],
+      "must_haves": {
+        "truths": [
+          "claude-history serve starts a foreground daemon binding TCP on 127.0.0.1:7424 (configurable via --port)",
+          "The same API is simultaneously served on Unix domain socket at /tmp/claude-history.sock (configurable via --socket or CLAUDE_HISTORY_SOCKET env)",
+          "SIGTERM and SIGINT trigger graceful shutdown: CancellationToken cancels both listeners, in-flight requests complete, socket file is cleaned up",
+          "The daemon runs as a foreground process (no daemonization -- launchd/systemd manages backgrounding)"
+        ],
+        "artifacts": [
+          "crates/server/src/serve.rs with run_server function handling dual-listener startup and shutdown",
+          "crates/server/src/main.rs updated with Serve command variant and run_serve handler"
+        ],
+        "key_links": [
+          "serve.rs creates CancellationToken and spawns two tokio tasks: one for TcpListener, one for UnixListener, each calling axum::serve with with_graceful_shutdown(token.cancelled())",
+          "Serve CLI command in main.rs calls serve::run_server with AppState built from open_db + port/socket args",
+          "Socket file is removed before binding (clean stale sockets) and after shutdown (cleanup)"
+        ]
+      },
+      "tasks": [
+        {
+          "name": "Task 1: Dual-listener serve.rs with graceful shutdown",
+          "type": "auto",
+          "files": [
+            "crates/server/src/serve.rs"
+          ],
+          "action": "Create crates/server/src/serve.rs. Import tokio::net::{TcpListener, UnixListener}, tokio_util::sync::CancellationToken. Define async fn shutdown_signal() that uses tokio::select! on ctrl_c() and signal(SignalKind::terminate).recv() (with #[cfg(unix)] / #[cfg(not(unix))] branches per research code example). Define pub async fn run_server(state: SharedState, port: u16, socket_path: PathBuf) -> anyhow::Result<()>. Implementation: (1) Build router via api::build_router(state). (2) Create CancellationToken. (3) Bind TcpListener to 127.0.0.1:{port}, log address. (4) Remove stale socket file if exists, bind UnixListener to socket_path, log path. (5) Clone router and token for each listener. (6) tokio::spawn TCP serve with with_graceful_shutdown(token.cancelled()). (7) tokio::spawn UDS serve with with_graceful_shutdown(token.cancelled()). (8) Spawn shutdown_signal() task that calls token.cancel() on signal. (9) tokio::select! on both handles -- when either completes or shutdown fires, log and proceed. (10) After both handles complete, remove socket file for cleanup. Log 'Server shutdown complete'.",
+          "verify": "cargo check --workspace compiles. serve.rs exports run_server function.",
+          "done": "serve.rs compiles with dual-listener pattern. CancellationToken wired to both axum::serve calls via with_graceful_shutdown. Signal handler catches SIGTERM and SIGINT."
+        },
+        {
+          "name": "Task 2: CLI Serve command variant and main.rs integration",
+          "type": "auto",
+          "files": [
+            "crates/server/src/main.rs"
+          ],
+          "action": "Add mod serve; and mod state; and mod api; declarations to main.rs. Add Serve variant to Commands enum: Serve { #[arg(long, default_value = \"7424\")] port: u16, #[arg(long)] socket: Option<PathBuf> }. The socket default is resolved at runtime: env CLAUDE_HISTORY_SOCKET, else /tmp/claude-history.sock. Add async fn run_serve(db_path_arg: Option<PathBuf>, port: u16, socket_arg: Option<PathBuf>) -> ExitCode. Implementation: (1) Open DB via existing open_db function. (2) Build SharedState from Arc::new(AppState { conn, version: env!(\"CARGO_PKG_VERSION\").to_string(), db_path }). (3) Resolve socket path from socket_arg, then CLAUDE_HISTORY_SOCKET env, then default /tmp/claude-history.sock. (4) Call serve::run_server(state, port, socket_path).await. Map Ok to SUCCESS, Err to FAILURE with eprintln. Add Serve match arm in main() dispatch. Log startup message including port and socket path.",
+          "verify": "cargo build --workspace succeeds. Running claude-history serve --help shows --port and --socket options. cargo check passes.",
+          "done": "claude-history serve subcommand exists. Running it attempts to bind TCP on 7424 and UDS on /tmp/claude-history.sock. SIGINT/SIGTERM triggers graceful shutdown."
+        }
+      ],
+      "verification": [
+        "cargo build --workspace succeeds",
+        "claude-history serve --help shows port and socket options",
+        "Running claude-history serve (with a synced DB) starts TCP listener on 7424 and UDS listener",
+        "Ctrl+C triggers graceful shutdown with cleanup log messages"
+      ],
+      "success_criteria": [
+        "claude-history serve binds to 127.0.0.1:7424 and /tmp/claude-history.sock simultaneously",
+        "curl http://localhost:7424/v1/health returns JSON with status, db_size, record_count, version",
+        "SIGTERM/SIGINT triggers graceful shutdown: both listeners stop, socket file is removed",
+        "The daemon runs as a foreground process"
+      ]
+    },
+    {
+      "plan_number": 5,
+      "name": "CLI-15: socket detection and daemon-aware CLI fallback",
+      "wave": 5,
+      "depends_on": ["03-04"],
+      "autonomous": true,
+      "is_tdd": false,
+      "requirements": ["CLI-15"],
+      "files_modified": [
+        "crates/server/src/main.rs"
+      ],
+      "must_haves": {
+        "truths": [
+          "When the daemon socket exists at the expected path, CLI subcommands detect it and report that the daemon is available",
+          "When the daemon socket does not exist, CLI subcommands open the DB directly in read-only mode as they do today",
+          "The socket detection path follows the same resolution as the serve command: CLI arg > CLAUDE_HISTORY_SOCKET env > /tmp/claude-history.sock default"
+        ],
+        "artifacts": [
+          "crates/server/src/main.rs with socket detection logic in open_db or a new helper function"
+        ],
+        "key_links": [
+          "socket_path resolution is shared between serve command (binding) and detection (checking existence)",
+          "Direct DB path continues to work identically when no daemon is running"
+        ]
+      },
+      "tasks": [
+        {
+          "name": "Task 1: Socket detection utility and CLI fallback integration",
+          "type": "auto",
+          "files": [
+            "crates/server/src/main.rs"
+          ],
+          "action": "Add a resolve_socket_path() function: checks socket CLI arg (if applicable), then CLAUDE_HISTORY_SOCKET env, then /tmp/claude-history.sock default. Returns PathBuf. Add a detect_daemon() function that checks if the resolved socket path exists on the filesystem. If it exists, log an info message: 'Daemon detected at {path}. API available via socket.' For Phase 3, CLI subcommands continue using direct DB access regardless of daemon status (the full HTTP-over-UDS client for CLI commands is deferred to avoid scope creep -- the research noted this is significant scope). The detection logic is the foundation: it verifies the socket exists and logs daemon availability. Modify the open_db function (or add a wrapper) to call detect_daemon() before opening the DB. If daemon is detected, log the socket path at info level so users know the API is available. The actual behavior remains: open DB directly for all subcommands. This satisfies CLI-15's 'CLI connects to daemon socket if available, otherwise opens DB read-only' at the detection level -- the 'connects to daemon' part is detection + reporting for now, with direct DB as the always-available fallback.",
+          "verify": "cargo check --workspace compiles. With daemon running, CLI subcommands log 'Daemon detected at ...' before executing. Without daemon, no detection message appears.",
+          "done": "resolve_socket_path and detect_daemon functions exist. CLI logs daemon availability when socket file is present. All existing subcommands continue to work via direct DB access."
+        }
+      ],
+      "verification": [
+        "cargo check --workspace succeeds",
+        "cargo build --workspace succeeds",
+        "All existing CLI subcommands still function correctly",
+        "With a socket file present at /tmp/claude-history.sock, CLI logs daemon detection"
+      ],
+      "success_criteria": [
+        "Socket path resolution uses CLI arg > env var > default, consistent with serve command",
+        "Daemon detection correctly identifies socket file presence",
+        "CLI subcommands work identically whether daemon is running or not (direct DB access in both cases for Phase 3)"
+      ]
+    }
+  ],
+  "patterns": [
+    "PAT-011: Database uses tokio-rusqlite with conn.call() closures -- all API handlers follow this pattern",
+    "PAT-020: clap derive CLI with #[tokio::main] -- Serve variant added to existing Commands enum",
+    "PAT-021: Path resolution: CLI arg > env var > HOME default -- socket path follows same pattern",
+    "PAT-022: Inline #[cfg(test)] mod tests -- new store functions get inline tests"
+  ],
+  "anti_patterns": [
+    "Do not open a new DB connection per request -- use shared AppState.conn via Arc",
+    "Do not call synchronous rusqlite inside async handlers -- always use conn.call()",
+    "Do not expose raw SQL or internal paths in API error responses -- sanitize via ApiError",
+    "Do not forget to remove stale socket files before binding UnixListener"
+  ]
+}
