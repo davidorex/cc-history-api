@@ -10,9 +10,9 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 1 of 6 (Core Types and Ingestion Pipeline)
-Plan: 0 of 3 in current phase
-Status: Ready to plan
-Last activity: 2026-02-20 -- Roadmap created with 6 phases covering 102 requirements
+Plan: 0 of 4 in current phase
+Status: Planned — 4 plans in 4 waves, ready for execution
+Last activity: 2026-02-20 -- Phase 1 planned with 4 plans (01-01 workspace+schema, 01-02 serde types+parser, 01-03 decomposer+drift, 01-04 sync+CLI)
 
 Progress: [░░░░░░░░░░] 0%
 
