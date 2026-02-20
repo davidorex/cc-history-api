@@ -88,7 +88,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01-PLAN.md — SSE event types, broadcast channel in AppState, GET /v1/events endpoint
+- [x] 04-01-PLAN.md — SSE event types, broadcast channel in AppState, GET /v1/events endpoint
 - [ ] 04-02-PLAN.md — File watcher module with debounce, sync triggering, SSE event emission, version detection
 
 ### Phase 5: Artifact Layer
@@ -132,6 +132,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
-| 4. Real-Time Ingestion and Events | 0/2 | Planned | - |
+| 4. Real-Time Ingestion and Events | 1/2 | In progress | - |
 | 5. Artifact Layer | 0/3 | Not started | - |
 | 6. Version Monitoring | 0/1 | Not started | - |
