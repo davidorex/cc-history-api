@@ -395,6 +395,20 @@ pub async fn sync_all(
         })?;
     }
 
+    // Retroactive artifact decomposition: backfill files/file_operations/git_operations
+    // from existing tool_executions. Idempotent via INSERT OR IGNORE, safe to run on
+    // every sync. Only runs when new records were ingested (tool_executions rows to process).
+    // Failures are logged but do not prevent sync_all from returning successfully.
+    if result.total_records > 0 {
+        match conn.call(|conn| {
+            crate::artifacts::decompose_artifacts_retroactive(conn)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        }).await {
+            Ok(rows) => tracing::info!(artifact_rows = rows, "Retroactive artifact decomposition complete"),
+            Err(e) => tracing::warn!(error = %e, "Retroactive artifact decomposition failed (non-fatal)"),
+        }
+    }
+
     Ok(result)
 }
 

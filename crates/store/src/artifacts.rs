@@ -506,6 +506,125 @@ fn upsert_file(
 }
 
 // ---------------------------------------------------------------------------
+// Retroactive artifact decomposition
+// ---------------------------------------------------------------------------
+
+/// Process existing tool_executions to retroactively populate artifact tables.
+///
+/// This handles data ingested before the artifact layer (migration 003) existed.
+/// Queries tool_executions joined with messages, processes each in chronological
+/// order, and inserts file_operations/git_operations/files rows.
+///
+/// Idempotent via INSERT OR IGNORE -- re-running on already-decomposed data
+/// produces no duplicates. [ART-04 retroactive support]
+pub fn decompose_artifacts_retroactive(
+    conn: &rusqlite::Connection,
+) -> Result<usize, DecomposeError> {
+    let mut stmt = conn.prepare(
+        "SELECT te.tool_use_id, te.tool_name, te.input_json, te.result_content, te.is_error,
+                m.uuid, m.session_id, m.timestamp
+         FROM tool_executions te
+         JOIN messages m ON m.uuid = te.message_uuid
+         WHERE te.tool_name IN ('Write', 'Edit', 'Read', 'Bash')
+         ORDER BY m.timestamp ASC",
+    )?;
+
+    struct ToolRow {
+        tool_use_id: String,
+        tool_name: String,
+        input_json: Option<String>,
+        _result_content: Option<String>,
+        _is_error: Option<i32>,
+        message_uuid: String,
+        session_id: String,
+        timestamp: String,
+    }
+
+    let rows: Vec<ToolRow> = stmt
+        .query_map([], |row| {
+            Ok(ToolRow {
+                tool_use_id: row.get(0)?,
+                tool_name: row.get(1)?,
+                input_json: row.get(2)?,
+                _result_content: row.get(3)?,
+                _is_error: row.get(4)?,
+                message_uuid: row.get(5)?,
+                session_id: row.get(6)?,
+                timestamp: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let mut total_inserted = 0;
+
+    for row in &rows {
+        let input: serde_json::Value = match &row.input_json {
+            Some(json_str) => match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(_) => continue, // Skip rows with unparseable input_json
+            },
+            None => continue,
+        };
+
+        let result = match row.tool_name.as_str() {
+            "Write" => extract_write_operation(
+                &row.session_id,
+                &row.tool_use_id,
+                &row.message_uuid,
+                &row.timestamp,
+                &input,
+                &tx,
+            ),
+            "Edit" => extract_edit_operation(
+                &row.session_id,
+                &row.tool_use_id,
+                &row.message_uuid,
+                &row.timestamp,
+                &input,
+                &tx,
+            ),
+            "Read" => extract_read_operation(
+                &row.session_id,
+                &row.tool_use_id,
+                &row.message_uuid,
+                &row.timestamp,
+                &input,
+                &tx,
+            ),
+            "Bash" => extract_bash_operations(
+                &row.session_id,
+                &row.tool_use_id,
+                &row.message_uuid,
+                &row.timestamp,
+                &input,
+                &tx,
+            ),
+            _ => Ok(0),
+        };
+
+        match result {
+            Ok(n) => total_inserted += n,
+            Err(e) => {
+                tracing::debug!(
+                    tool_use_id = %row.tool_use_id,
+                    error = %e,
+                    "Retroactive artifact extraction failed for tool_use, skipping"
+                );
+            }
+        }
+    }
+
+    tx.commit()?;
+
+    Ok(total_inserted)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
