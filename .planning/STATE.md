@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 3 of 6 (HTTP API and Daemon) — IN PROGRESS
-Plan: 1 of 6 complete in current phase — foundation (deps, types, queries) done
-Status: Plan 03-01 complete. AppState, ApiError, and 7 store query functions ready. Plan 03-02 next (API handlers).
-Last activity: 2026-02-20 -- Plan 03-01 executed (workspace deps, AppState, ApiError, 7 query functions)
+Plan: 2 of 6 complete in current phase — foundation + all 10 API handlers done
+Status: Plan 03-02 complete. 10 endpoint handlers and build_router ready. Plan 03-03 next (remaining endpoints).
+Last activity: 2026-02-20 -- Plan 03-02 executed (health, sessions, messages, search handlers + build_router)
 
-Progress: [█████░░░░░] ~42% (8 of ~19 total plans)
+Progress: [█████░░░░░] ~47% (9 of ~19 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
+- Total plans completed: 9
 - Average duration: ~7 min
-- Total execution time: ~0.9 hours
+- Total execution time: ~1.0 hours
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [█████░░░░░] ~42% (8 of ~19 total plans)
 |-------|-------|-------|----------|
 | 01 | 4/4 | 28 min | 7 min |
 | 02 | 3/3 | 22 min | 7.3 min |
-| 03 | 1/6 | ~5 min | ~5 min |
+| 03 | 2/6 | ~11 min | ~5.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 10, 4, 12, 6, 5 min
-- Trend: 03-01 was fast — deps + types + query functions, no integration complexity yet
+- Last 5 plans: 4, 12, 6, 5, 6 min
+- Trend: 03-02 handlers+router straightforward — conn.call pattern well-established from CLI
 
 *Updated after each plan completion*
 
@@ -71,6 +71,8 @@ Recent decisions affecting current work:
 - [03-01]: rusqlite accessed via tokio_rusqlite::rusqlite re-export in server crate (per decision [02-03]), avoiding direct rusqlite dependency
 - [03-01]: tokio_rusqlite::Error variant is Error(E) not Rusqlite — plan pseudocode adjusted at implementation time
 - [03-01]: tokio_rusqlite::Error is #[non_exhaustive], requiring wildcard catch-all arm in match
+- [03-02]: Used axum 0.8 path parameter syntax ({id}) instead of :id — axum 0.8 requires curly-brace syntax
+- [03-02]: search handler validates non-empty q parameter, returns 400 BadRequest — exercises the previously-unused BadRequest variant
 
 ### Pending Todos
 
@@ -83,5 +85,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Plan 03-01 complete, ready for 03-02
-Resume file: .planning/phases/03-http-api-and-daemon/03-02-PLAN.md (next plan)
+Stopped at: Plan 03-02 complete, ready for 03-03
+Resume file: .planning/phases/03-http-api-and-daemon/03-03-PLAN.md (next plan)
