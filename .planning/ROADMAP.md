@@ -101,12 +101,17 @@ Plans:
   3. `claude-history git-log` shows git operations extracted from Bash tool calls, with commit messages, branches, and operation types correctly parsed
   4. GET /v1/artifacts/:session_id/timeline returns a chronological feed of all file writes, edits, git commits, and tool outputs for a session
   5. tool_use blocks in assistant messages are correctly linked to their tool_result blocks in subsequent user messages by tool_use_id, and file:written / git:commit SSE events fire during live ingestion
-**Plans**: TBD
+**Plans**: 8 plans
 
 Plans:
-- [ ] 05-01: TBD
-- [ ] 05-02: TBD
-- [ ] 05-03: TBD
+- [ ] 05-01-PLAN.md — Migration 003 (files, file_operations, git_operations tables + FTS5) and workspace deps
+- [ ] 05-02-PLAN.md — Artifact decomposer: Write/Edit/Read/Bash parsing into artifact tables
+- [ ] 05-03-PLAN.md — Tool result matching (ART-04) and retroactive artifact decomposition
+- [ ] 05-04-PLAN.md — Artifact queries: list files, reconstruction via edit replay, unified diffs
+- [ ] 05-05-PLAN.md — FTS5 file_operations index: rebuild and search functions
+- [ ] 05-06-PLAN.md — HTTP API handlers: files, git, artifacts (11 new endpoints)
+- [ ] 05-07-PLAN.md — CLI subcommands: files, file-history, reconstruct, git-log, artifacts
+- [ ] 05-08-PLAN.md — SSE events (file:written, file:edited, git:commit) and watcher integration
 
 ### Phase 6: Version Monitoring
 **Goal**: The daemon actively tracks Claude Code version changes and provides actionable schema drift analysis across versions
@@ -133,5 +138,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
-| 5. Artifact Layer | 0/3 | Not started | - |
+| 5. Artifact Layer | 0/8 | Not started | - |
 | 6. Version Monitoring | 0/1 | Not started | - |
