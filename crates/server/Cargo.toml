@@ -1,0 +1,18 @@
+[package]
+name = "claude-history"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "claude-history"
+path = "src/main.rs"
+
+[dependencies]
+claude-history-core = { path = "../core" }
+claude-history-store = { path = "../store" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+walkdir = { workspace = true }
+anyhow = { workspace = true }
