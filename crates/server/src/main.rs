@@ -119,6 +119,24 @@ enum Commands {
         #[arg(long, default_value = "json")]
         format: String,
     },
+    /// Show Claude Code version history detected from ingested data
+    VersionCheck {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show schema drift events (unknown fields captured during ingestion)
+    SchemaDrift {
+        /// Filter by record type
+        #[arg(long)]
+        record_type: Option<String>,
+        /// Maximum entries to show
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Resolve the database file path.
@@ -199,6 +217,12 @@ async fn main() -> ExitCode {
         Commands::Export { session_id, format } => {
             run_export(cli.db_path, session_id, format).await
         }
+        Commands::VersionCheck { json } => run_version_check(cli.db_path, json).await,
+        Commands::SchemaDrift {
+            record_type,
+            limit,
+            json,
+        } => run_schema_drift(cli.db_path, record_type, limit, json).await,
     }
 }
 
@@ -582,4 +606,176 @@ async fn run_export(
             ExitCode::FAILURE
         }
     }
+}
+
+/// Show Claude Code version history detected from ingested data.
+///
+/// [CLI-08] Calls store::query::version_history inside conn.call(), returning
+/// distinct version strings with their first and last seen timestamps. Output
+/// is either a column-aligned table (default) or JSON (--json flag). If no
+/// version data is found, prints a suggestion to run sync first.
+async fn run_version_check(db_path_arg: Option<PathBuf>, json: bool) -> ExitCode {
+    let conn = match open_db(db_path_arg).await {
+        Some(c) => c,
+        None => return ExitCode::FAILURE,
+    };
+
+    let results = match conn
+        .call(move |conn| claude_history_store::query::version_history(conn))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Version check failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if results.is_empty() {
+        eprintln!("No version data found. Run 'claude-history sync' first.");
+        return ExitCode::SUCCESS;
+    }
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        println!(
+            "{:<30}  {:<24}  {:<24}",
+            "VERSION", "FIRST_SEEN", "LAST_SEEN"
+        );
+        println!(
+            "{:<30}  {:<24}  {:<24}",
+            "------------------------------",
+            "------------------------",
+            "------------------------"
+        );
+        for entry in &results {
+            let version_display = if entry.version.len() > 30 {
+                &entry.version[..30]
+            } else {
+                &entry.version
+            };
+            let first_display = if entry.first_seen.len() > 24 {
+                &entry.first_seen[..24]
+            } else {
+                &entry.first_seen
+            };
+            let last_display = if entry.last_seen.len() > 24 {
+                &entry.last_seen[..24]
+            } else {
+                &entry.last_seen
+            };
+            println!(
+                "{:<30}  {:<24}  {:<24}",
+                version_display, first_display, last_display
+            );
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Show schema drift events (unknown fields captured during ingestion).
+///
+/// [CLI-09] Calls store::query::schema_drift_list inside conn.call(), returning
+/// all schema_drift_log entries. Applies optional record_type filter and limit
+/// in Rust after retrieval (keeps query.rs simple; filter could move to SQL
+/// later if performance warrants). Output is either a column-aligned table
+/// (default) or JSON (--json flag). If no drift entries exist, prints a
+/// helpful message.
+async fn run_schema_drift(
+    db_path_arg: Option<PathBuf>,
+    record_type: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let conn = match open_db(db_path_arg).await {
+        Some(c) => c,
+        None => return ExitCode::FAILURE,
+    };
+
+    let all_results = match conn
+        .call(move |conn| claude_history_store::query::schema_drift_list(conn))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Schema drift query failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Apply record_type filter in Rust if provided
+    let filtered: Vec<_> = if let Some(ref rt) = record_type {
+        all_results
+            .into_iter()
+            .filter(|e| e.record_type == *rt)
+            .collect()
+    } else {
+        all_results
+    };
+
+    // Apply limit truncation
+    let results: Vec<_> = filtered.into_iter().take(limit).collect();
+
+    if results.is_empty() {
+        eprintln!("No schema drift detected.");
+        return ExitCode::SUCCESS;
+    }
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        println!(
+            "{:<25}  {:<20}  {:<16}  {:<24}  {:<50}",
+            "FIELD", "RECORD_TYPE", "VERSION", "FIRST_SEEN", "SAMPLE_VALUE"
+        );
+        println!(
+            "{:<25}  {:<20}  {:<16}  {:<24}  {:<50}",
+            "-------------------------",
+            "--------------------",
+            "----------------",
+            "------------------------",
+            "--------------------------------------------------"
+        );
+        for entry in &results {
+            let field_display = if entry.field_name.len() > 25 {
+                &entry.field_name[..25]
+            } else {
+                &entry.field_name
+            };
+            let rt_display = if entry.record_type.len() > 20 {
+                &entry.record_type[..20]
+            } else {
+                &entry.record_type
+            };
+            let version_display = entry.version.as_deref().unwrap_or("-");
+            let version_display = if version_display.len() > 16 {
+                &version_display[..16]
+            } else {
+                version_display
+            };
+            let first_seen_display = if entry.first_seen_at.len() > 24 {
+                &entry.first_seen_at[..24]
+            } else {
+                &entry.first_seen_at
+            };
+            let sample = entry.sample_value.as_deref().unwrap_or("-");
+            let sample_display = if sample.len() > 50 {
+                &sample[..50]
+            } else {
+                sample
+            };
+            println!(
+                "{:<25}  {:<20}  {:<16}  {:<24}  {:<50}",
+                field_display, rt_display, version_display, first_seen_display, sample_display
+            );
+        }
+    }
+
+    ExitCode::SUCCESS
 }
