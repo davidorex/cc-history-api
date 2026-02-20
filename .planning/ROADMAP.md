@@ -31,12 +31,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Malformed JSONL lines produce logged warnings but do not halt ingestion -- all valid records in the same file are still decomposed
   4. Unknown fields in JSONL records (simulated or real) appear in the schema_drift_log table with field name, sample value, and source context
   5. The SQLite database uses WAL mode, embedded migrations track schema version, and the Cargo workspace compiles to a single binary
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
-- [ ] 01-03: TBD
+- [ ] 01-01-PLAN.md — Cargo workspace + SQLite schema + migrations + DB initialization
+- [ ] 01-02-PLAN.md — Serde types for all 7 JSONL record types + JSONL parser with byte-offset tracking
+- [ ] 01-03-PLAN.md — Record decomposition engine + schema drift logger
+- [ ] 01-04-PLAN.md — Sync engine + CLI sync subcommand (end-to-end integration)
 
 ### Phase 2: Full-Text Search and CLI
 **Goal**: Users can search across all ingested session content and interact with their history through a complete CLI that answers questions about sessions, messages, tokens, and tools
@@ -123,7 +124,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Types and Ingestion Pipeline | 0/3 | Not started | - |
+| 1. Core Types and Ingestion Pipeline | 0/4 | Planned | - |
 | 2. Full-Text Search and CLI | 0/2 | Not started | - |
 | 3. HTTP API and Daemon | 0/3 | Not started | - |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
