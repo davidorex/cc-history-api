@@ -10,6 +10,7 @@ use rusqlite::Connection;
 /// Each migration is applied at most once, tracked by the schema_versions table.
 const MIGRATIONS: &[(&str, &str)] = &[
     ("001", include_str!("../migrations/001_initial.sql")),
+    ("002", include_str!("../migrations/002_fts5.sql")),
 ];
 
 /// Errors that can occur during migration application.
