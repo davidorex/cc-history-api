@@ -10,27 +10,27 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 1 of 6 (Core Types and Ingestion Pipeline)
-Plan: 0 of 4 in current phase
-Status: Planned — 4 plans in 4 waves, ready for execution
-Last activity: 2026-02-20 -- Phase 1 planned with 4 plans (01-01 workspace+schema, 01-02 serde types+parser, 01-03 decomposer+drift, 01-04 sync+CLI)
+Plan: 1 of 4 complete in current phase
+Status: Executing — 01-01 complete (workspace+schema), 01-02 next (serde types+parser)
+Last activity: 2026-02-20 -- Completed 01-01: Cargo workspace with 3 crates, SQLite schema with 13 tables, WAL mode, embedded migration runner
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] ~4% (1 of ~15 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: --
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 7 min
+- Total execution time: 0.1 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01 | 1/4 | 7 min | 7 min |
 
 **Recent Trend:**
-- Last 5 plans: --
+- Last 5 plans: 7 min
 - Trend: --
 
 *Updated after each plan completion*
@@ -44,6 +44,9 @@ Recent decisions affecting current work:
 
 - [Roadmap]: 6-phase structure following crate dependency graph (core -> store -> server), artifact layer deferred to Phase 5 per research recommendation
 - [Roadmap]: tokio-rusqlite bridge and split writer/reader pool established in Phase 1 to avoid costly retrofitting
+- [01-01]: Pinned rusqlite to 0.37 (not 0.38) — tokio-rusqlite 0.7.0 depends on rusqlite 0.37 via libsqlite3-sys 0.35
+- [01-01]: Removed fts5 feature flag — bundled SQLite includes FTS5 by default; rusqlite 0.37 does not expose it separately
+- [01-01]: SchemaError mapped to rusqlite::Error via ToSqlConversionFailure inside conn.call closure
 
 ### Pending Todos
 
@@ -57,5 +60,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Roadmap creation complete
-Resume file: None
+Stopped at: 01-01 finalized, 01-02 next
+Resume file: .planning/phases/01-core-types-and-ingestion-pipeline/01-02-PLAN.md

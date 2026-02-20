@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 4 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Cargo workspace + SQLite schema + migrations + DB initialization
+- [x] 01-01-PLAN.md — Cargo workspace + SQLite schema + migrations + DB initialization
 - [ ] 01-02-PLAN.md — Serde types for all 7 JSONL record types + JSONL parser with byte-offset tracking
 - [ ] 01-03-PLAN.md — Record decomposition engine + schema drift logger
 - [ ] 01-04-PLAN.md — Sync engine + CLI sync subcommand (end-to-end integration)
@@ -124,7 +124,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Types and Ingestion Pipeline | 0/4 | Planned | - |
+| 1. Core Types and Ingestion Pipeline | 1/4 | In Progress | - |
 | 2. Full-Text Search and CLI | 0/2 | Not started | - |
 | 3. HTTP API and Daemon | 0/3 | Not started | - |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
