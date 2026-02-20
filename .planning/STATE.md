@@ -9,18 +9,18 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 
 ## Current Position
 
-Phase: 2 of 6 (Full-Text Search and CLI) — PLANNED
-Plan: 0 of 3 complete in current phase
-Status: Phase 2 planned — 3 plans (FTS5+store queries, CLI search/sessions/query/stats, CLI export/version/drift). Ready for execution.
-Last activity: 2026-02-20 -- Phase 2 planned with 3 plans in 3 sequential waves
+Phase: 2 of 6 (Full-Text Search and CLI) — IN PROGRESS
+Plan: 1 of 3 complete in current phase
+Status: Plan 02-01 (FTS5 Index + Store Query Layer) complete. Next: 02-02 (CLI search/sessions/query/stats).
+Last activity: 2026-02-20 -- Completed 02-01-PLAN.md (FTS5 + query layer)
 
-Progress: [███░░░░░░░] ~27% (4 of ~15 total plans)
+Progress: [████░░░░░░] ~33% (5 of ~15 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Average duration: 7 min
+- Total plans completed: 5
+- Average duration: 6.4 min
 - Total execution time: 0.5 hours
 
 **By Phase:**
@@ -28,10 +28,11 @@ Progress: [███░░░░░░░] ~27% (4 of ~15 total plans)
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 4/4 | 28 min | 7 min |
+| 02 | 1/3 | 4 min | 4 min |
 
 **Recent Trend:**
-- Last 5 plans: 7, 6, 5, 10 min
-- Trend: stable (01-04 longer due to end-to-end integration + real data verification)
+- Last 5 plans: 6, 5, 10, 4 min
+- Trend: stable-to-improving (02-01 faster due to no TDD and familiar patterns)
 
 *Updated after each plan completion*
 
@@ -55,6 +56,9 @@ Recent decisions affecting current work:
 - [01-03]: Qualified record_type names for assistant overflow maps: 'assistant', 'assistant.message', 'assistant.message.usage' — enables per-layer drift analysis
 - [01-03]: file_history_snapshot decomposition skips with debug log — no target table in Phase 1 schema
 - [01-04]: No deviation-level decisions — sync engine and CLI implemented per plan specification
+- [02-01]: FTS5 external-content mode with rebuild-after-sync — avoids storage duplication while keeping index consistent
+- [02-01]: User query input sanitized by double-quote wrapping — prevents FTS5 syntax injection, treats as phrase search
+- [02-01]: Dynamic query parameters use Box<dyn ToSql> with params_from_iter — handles variable-count WHERE clauses
 
 ### Pending Todos
 
@@ -67,5 +71,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 2 planned (3 plans created), ready for execution
-Resume file: .planning/phases/02-full-text-search-and-cli/02-01-PLAN.md
+Stopped at: Plan 02-01 complete, ready for 02-02 execution
+Resume file: .planning/phases/02-full-text-search-and-cli/02-02-PLAN.md
