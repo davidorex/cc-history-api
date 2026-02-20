@@ -35,6 +35,7 @@ mod export;
 mod output;
 mod serve;
 mod state;
+mod watcher;
 
 use daemon_client::{ConnectionMode, detect_connection_mode, resolve_socket_path};
 

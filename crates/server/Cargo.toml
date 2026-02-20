@@ -30,3 +30,4 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 tokio-stream = { workspace = true }
 futures-util = { workspace = true }
+notify = { workspace = true }
