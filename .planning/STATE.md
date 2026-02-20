@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 5 - Artifact Layer -- PLANNED
+**Current focus:** Phase 5 - Artifact Layer -- IN PROGRESS
 
 ## Current Position
 
-Phase: 5 of 6 (Artifact Layer) -- PLANNED
-Plan: 0 of 8 complete in current phase
-Status: Phase 5 planned. 8 plans in 5 waves. Ready for execution.
-Last activity: 2026-02-20 -- Planned Phase 5 (8 plans, 15 tasks, 31 requirements)
+Phase: 5 of 6 (Artifact Layer) -- IN PROGRESS
+Plan: 1 of 8 complete in current phase
+Status: Plan 05-01 (Migration & Deps) complete. Wave 1 done. Wave 2 ready.
+Last activity: 2026-02-20 -- Completed 05-01-PLAN.md (migration 003, workspace deps)
 
-Progress: [████████░░] ~76% (15 of ~23 total plans)
+Progress: [████████░░] ~70% (16 of ~23 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 15
-- Average duration: ~6.0 min
+- Total plans completed: 16
+- Average duration: ~5.8 min
 - Total execution time: ~1.5 hours
 
 **By Phase:**
@@ -31,10 +31,11 @@ Progress: [████████░░] ~76% (15 of ~23 total plans)
 | 02 | 3/3 | 22 min | 7.3 min |
 | 03 | 6/6 | ~30 min | ~5 min |
 | 04 | 2/2 | 8 min | 4 min |
+| 05 | 1/8 | 2 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 5, 5, 4, 3, 5 min
-- Trend: 04-02 File watcher completed in 5 min — 1 deviation (clap env attribute blocker fix)
+- Last 5 plans: 5, 4, 3, 5, 2 min
+- Trend: 05-01 Migration & deps completed in 2 min — no deviations
 
 *Updated after each plan completion*
 
@@ -95,10 +96,10 @@ None yet.
 
 ### Blockers/Concerns
 
-- FTS-02 (file_operations FTS index) deferred to Phase 5 — file_operations table does not exist until Phase 5 (Artifact Layer). Phase 2 SC-1 is partially satisfied for message content only.
+- FTS-02 (file_operations FTS index) now created in migration 003 (05-01). Phase 2 SC-1 blocker resolved.
 
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 5 planned, ready for execution
+Stopped at: Phase 5, Plan 01 complete. Wave 2 (Plans 02-04) ready for execution.
 Resume file: /gsd:execute-phase 5
