@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 2 - Full-Text Search and CLI
+**Current focus:** Phase 3 - HTTP API and Daemon
 
 ## Current Position
 
-Phase: 2 of 6 (Full-Text Search and CLI) — COMPLETE
-Plan: 3 of 3 complete in current phase — phase finalized
-Status: Phase 2 complete. All 3 plans executed and summarized. 8 CLI subcommands operational. Ready for Phase 3.
-Last activity: 2026-02-20 -- Finalized 02-03-PLAN.md, Phase 2 complete
+Phase: 3 of 6 (HTTP API and Daemon) — PLANNED
+Plan: 0 of 6 complete in current phase — planning finalized, ready for execution
+Status: Phase 3 planned. 6 plans in 6 sequential waves. axum 0.8 HTTP API + dual TCP/UDS listeners + DaemonClient for CLI-over-daemon routing.
+Last activity: 2026-02-20 -- Phase 3 planning complete (research, plan, verify, generate)
 
-Progress: [█████░░░░░] ~47% (7 of ~15 total plans)
+Progress: [█████░░░░░] ~47% (7 of ~19 total plans)
 
 ## Performance Metrics
 
@@ -79,5 +79,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 2 finalized, all plans summarized
-Resume file: .planning/ROADMAP.md (Phase 3 next)
+Stopped at: Phase 3 planning complete, ready for execution
+Resume file: .planning/phases/03-http-api-and-daemon/03-01-PLAN.md (first plan)
