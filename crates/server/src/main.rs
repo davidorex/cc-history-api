@@ -61,6 +61,10 @@ enum Commands {
         /// Unix domain socket path. Defaults to $CLAUDE_HISTORY_SOCKET or /tmp/claude-history.sock.
         #[arg(long)]
         socket: Option<PathBuf>,
+        /// Path to Claude Code projects directory for live file watching.
+        /// Defaults to $CLAUDE_PROJECTS_DIR or ~/.claude/projects/
+        #[arg(long)]
+        projects_dir: Option<PathBuf>,
     },
     /// Sync JSONL session files into the database
     Sync {
@@ -187,10 +191,17 @@ fn resolve_db_path(cli_arg: Option<PathBuf>) -> Option<PathBuf> {
 ///
 /// Priority:
 /// 1. Explicit CLI argument (if provided)
-/// 2. $HOME/.claude/projects/ (fallback default)
+/// 2. CLAUDE_PROJECTS_DIR environment variable (if set and non-empty)
+/// 3. $HOME/.claude/projects/ (fallback default)
 fn resolve_projects_dir(cli_arg: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(p) = cli_arg {
         return Some(p);
+    }
+
+    if let Ok(p) = std::env::var("CLAUDE_PROJECTS_DIR") {
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
     }
 
     std::env::var("HOME").ok().map(|home| {
@@ -238,7 +249,7 @@ async fn main() -> ExitCode {
     match cli.command {
         // Serve and Sync bypass ConnectionMode — Serve IS the daemon, Sync is a
         // write operation that must always open the DB directly.
-        Commands::Serve { port, socket } => run_serve(cli.db_path, port, socket).await,
+        Commands::Serve { port, socket, projects_dir } => run_serve(cli.db_path, port, socket, projects_dir).await,
         Commands::Sync { projects_dir } => run_sync(projects_dir, cli.db_path).await,
 
         // All read-only subcommands: detect daemon vs direct DB once at startup.
@@ -370,12 +381,15 @@ async fn run_sync(projects_dir_arg: Option<PathBuf>, db_path_arg: Option<PathBuf
 /// Start the HTTP API daemon on TCP and Unix domain socket.
 ///
 /// [CLI-01] Opens the database, builds SharedState, resolves the socket path
-/// (from --socket arg, then CLAUDE_HISTORY_SOCKET env, then default), and
-/// calls serve::run_server which blocks until shutdown signal (SIGINT/SIGTERM).
+/// (from --socket arg, then CLAUDE_HISTORY_SOCKET env, then default), resolves
+/// the projects directory for live file watching (from --projects-dir arg,
+/// then CLAUDE_PROJECTS_DIR env, then ~/.claude/projects/), and calls
+/// serve::run_server which blocks until shutdown signal (SIGINT/SIGTERM).
 async fn run_serve(
     db_path_arg: Option<PathBuf>,
     port: u16,
     socket_arg: Option<PathBuf>,
+    projects_dir_arg: Option<PathBuf>,
 ) -> ExitCode {
     // Resolve database path and open connection
     let db_path = match resolve_db_path(db_path_arg) {
@@ -431,15 +445,39 @@ async fn run_serve(
         })
         .unwrap_or_else(|| PathBuf::from("/tmp/claude-history.sock"));
 
+    // Resolve projects directory: --projects-dir arg > CLAUDE_PROJECTS_DIR env
+    // > $HOME/.claude/projects/ default. Uses the same resolution function as
+    // the Sync subcommand for consistency (PAT-020 pattern).
+    // If the directory does not exist, log a warning but proceed — Claude Code
+    // may not have created sessions yet, and the watcher will handle the missing
+    // directory gracefully (notify returns an error, which serve.rs logs and
+    // continues without live ingestion).
+    let projects_dir = match resolve_projects_dir(projects_dir_arg) {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: Could not determine projects directory. Set CLAUDE_PROJECTS_DIR or HOME environment variable, or pass --projects-dir.");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !projects_dir.exists() {
+        tracing::warn!(
+            path = %projects_dir.display(),
+            "Projects directory does not exist — file watcher may fail to start. \
+             Claude Code may not have created sessions yet."
+        );
+    }
+
     tracing::info!(
         port = port,
         socket = %socket_path.display(),
         db = %db_path.display(),
+        projects_dir = %projects_dir.display(),
         version = %env!("CARGO_PKG_VERSION"),
         "Starting claude-history daemon"
     );
 
-    match serve::run_server(state, port, socket_path).await {
+    match serve::run_server(state, port, socket_path, projects_dir).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: Server failed: {}", e);

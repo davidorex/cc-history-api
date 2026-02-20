@@ -52,13 +52,19 @@ async fn shutdown_signal() {
 ///
 /// This function:
 /// 1. Builds the API router from `api::build_router(state)`
-/// 2. Creates a `CancellationToken` shared between both listeners
-/// 3. Binds a `TcpListener` on `127.0.0.1:{port}`
-/// 4. Removes any stale socket file and binds a `UnixListener` on `socket_path`
-/// 5. Spawns both listeners as tokio tasks with `with_graceful_shutdown`
-/// 6. Spawns a signal handler task that cancels the token on SIGTERM/SIGINT
-/// 7. Waits for both listener tasks to complete (either via shutdown or error)
-/// 8. Cleans up the socket file after shutdown
+/// 2. Creates a `CancellationToken` shared between both listeners and watcher
+/// 3. Spawns the filesystem watcher on a blocking thread and the watcher_loop
+///    as a tokio task for live JSONL ingestion with SSE event emission
+/// 4. Binds a `TcpListener` on `127.0.0.1:{port}`
+/// 5. Removes any stale socket file and binds a `UnixListener` on `socket_path`
+/// 6. Spawns both listeners as tokio tasks with `with_graceful_shutdown`
+/// 7. Spawns a signal handler task that cancels the token on SIGTERM/SIGINT
+/// 8. Waits for both listener tasks to complete (either via shutdown or error)
+/// 9. Cleans up the socket file after shutdown
+///
+/// The watcher thread is not explicitly shut down -- when the daemon process
+/// exits, all threads are cleaned up. The CancellationToken causes the
+/// watcher_loop to exit its select! loop, which drops the mpsc Receiver.
 ///
 /// The function runs as a foreground process -- no daemonization logic is
 /// included. Background management is intended for launchd/systemd.
@@ -66,9 +72,46 @@ pub async fn run_server(
     state: SharedState,
     port: u16,
     socket_path: PathBuf,
+    projects_dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let app = api::build_router(state);
+    let app = api::build_router(state.clone());
     let token = CancellationToken::new();
+
+    // --- File watcher for live JSONL ingestion ---
+    // Create an mpsc channel for the notify watcher to send filesystem events
+    // to the async watcher_loop. Buffer of 256 allows burst tolerance without
+    // excessive memory use.
+    let (watch_tx, watch_rx) = tokio::sync::mpsc::channel(256);
+
+    // Spawn the notify watcher on a blocking thread. If the projects_dir does
+    // not exist yet (Claude Code may not have created sessions), this will
+    // return an error that we log as a warning and continue — the watcher is
+    // optional for basic daemon operation.
+    match crate::watcher::spawn_watcher(projects_dir.clone(), watch_tx) {
+        Ok(()) => {
+            // Spawn the watcher processing loop as a tokio task.
+            // It shares the database connection (Arc-based Clone) and the
+            // broadcast sender for SSE event emission.
+            let watcher_conn = state.conn.clone();
+            let watcher_event_tx = state.event_tx.clone();
+            let watcher_token = token.clone();
+            tokio::spawn(async move {
+                crate::watcher::watcher_loop(watch_rx, watcher_conn, watcher_event_tx, watcher_token).await;
+            });
+            tracing::info!(
+                path = %projects_dir.display(),
+                "File watcher started for projects directory"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %projects_dir.display(),
+                error = %e,
+                "Failed to start file watcher — live ingestion will be unavailable. \
+                 The daemon will still serve API requests from existing data."
+            );
+        }
+    }
 
     // --- TCP listener ---
     let tcp_listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
