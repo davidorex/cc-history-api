@@ -12,7 +12,7 @@ claude-history delivers universal queryable access to Claude Code's session hist
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Core Types and Ingestion Pipeline** - Serde type modeling, JSONL parser, SQLite schema, record decomposer, incremental sync, bulk import
+- [x] **Phase 1: Core Types and Ingestion Pipeline** - Serde type modeling, JSONL parser, SQLite schema, record decomposer, incremental sync, bulk import
 - [ ] **Phase 2: Full-Text Search and CLI** - FTS5 search indexes, CLI interface for querying and exporting session data
 - [ ] **Phase 3: HTTP API and Daemon** - axum HTTP API at /v1/, Unix domain socket, daemon mode with graceful shutdown
 - [ ] **Phase 4: Real-Time Ingestion and Events** - File watcher for live JSONL changes, SSE event stream for connected consumers
@@ -37,7 +37,7 @@ Plans:
 - [x] 01-01-PLAN.md — Cargo workspace + SQLite schema + migrations + DB initialization
 - [x] 01-02-PLAN.md — Serde types for all 7 JSONL record types + JSONL parser with byte-offset tracking
 - [x] 01-03-PLAN.md — Record decomposition engine + schema drift logger
-- [ ] 01-04-PLAN.md — Sync engine + CLI sync subcommand (end-to-end integration)
+- [x] 01-04-PLAN.md — Sync engine + CLI sync subcommand (end-to-end integration)
 
 ### Phase 2: Full-Text Search and CLI
 **Goal**: Users can search across all ingested session content and interact with their history through a complete CLI that answers questions about sessions, messages, tokens, and tools
@@ -124,7 +124,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Types and Ingestion Pipeline | 3/4 | In Progress | - |
+| 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
 | 2. Full-Text Search and CLI | 0/2 | Not started | - |
 | 3. HTTP API and Daemon | 0/3 | Not started | - |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |

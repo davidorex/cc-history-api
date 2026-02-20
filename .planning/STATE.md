@@ -9,29 +9,29 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 
 ## Current Position
 
-Phase: 1 of 6 (Core Types and Ingestion Pipeline)
-Plan: 3 of 4 complete in current phase
-Status: Executing — 01-01 complete (workspace+schema), 01-02 complete (serde types+parser), 01-03 complete (decomposition+drift), 01-04 next (sync+CLI)
-Last activity: 2026-02-20 -- Completed 01-03: Record decomposition engine for all 7 JSONL types + schema drift logger with overflow capture
+Phase: 1 of 6 (Core Types and Ingestion Pipeline) — COMPLETE
+Plan: 4 of 4 complete in current phase
+Status: Phase 1 complete — all 4 plans executed, all 5 spec success criteria verified against real data. Phase 2 not yet planned.
+Last activity: 2026-02-20 -- Completed 01-04: Sync engine + CLI sync subcommand, 768K records ingested from real data, incremental sync verified
 
-Progress: [███░░░░░░░] ~20% (3 of ~15 total plans)
+Progress: [███░░░░░░░] ~27% (4 of ~15 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 6 min
-- Total execution time: 0.3 hours
+- Total plans completed: 4
+- Average duration: 7 min
+- Total execution time: 0.5 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 3/4 | 18 min | 6 min |
+| 01 | 4/4 | 28 min | 7 min |
 
 **Recent Trend:**
-- Last 5 plans: 7, 6, 5 min
-- Trend: stable/improving
+- Last 5 plans: 7, 6, 5, 10 min
+- Trend: stable (01-04 longer due to end-to-end integration + real data verification)
 
 *Updated after each plan completion*
 
@@ -54,6 +54,7 @@ Recent decisions affecting current work:
 - [01-03]: drift.rs co-committed with decompose.rs — compile-time dependency (decompose imports drift::log_overflow) prevented separate commits
 - [01-03]: Qualified record_type names for assistant overflow maps: 'assistant', 'assistant.message', 'assistant.message.usage' — enables per-layer drift analysis
 - [01-03]: file_history_snapshot decomposition skips with debug log — no target table in Phase 1 schema
+- [01-04]: No deviation-level decisions — sync engine and CLI implemented per plan specification
 
 ### Pending Todos
 
@@ -67,5 +68,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: 01-03 finalized, 01-04 next
-Resume file: .planning/phases/01-core-types-and-ingestion-pipeline/01-04-PLAN.md
+Stopped at: Phase 1 complete (all 4 plans finalized), Phase 2 not yet planned
+Resume file: .planning/ROADMAP.md (Phase 2 planning needed)
