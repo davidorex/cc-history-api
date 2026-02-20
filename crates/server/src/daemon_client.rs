@@ -29,6 +29,7 @@ use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
 use crate::api::health::HealthResponse;
+use claude_history_store::artifact_queries::{FileEntry, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{
     DriftEntry, MessageResult, ModelStats, SessionSummary, TokenStats, ToolStats, VersionEntry,
@@ -422,6 +423,75 @@ impl DaemonClient {
         } else {
             format!("/v1/schema/drift?{}", params.join("&"))
         };
+        self.get(&path).await
+    }
+
+    // -------------------------------------------------------------------
+    // Artifact endpoint methods
+    // -------------------------------------------------------------------
+
+    /// GET /v1/files — list tracked files with optional filters.
+    ///
+    /// Supports optional session_id, path substring, and limit parameters.
+    pub async fn files(
+        &self,
+        session_id: Option<&str>,
+        path: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<FileEntry>, DaemonError> {
+        let mut params = Vec::new();
+        if let Some(sid) = session_id {
+            params.push(format!("session_id={}", urlencoded(sid)));
+        }
+        if let Some(p) = path {
+            params.push(format!("path={}", urlencoded(p)));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        let path_str = if params.is_empty() {
+            "/v1/files".to_string()
+        } else {
+            format!("/v1/files?{}", params.join("&"))
+        };
+        self.get(&path_str).await
+    }
+
+    /// GET /v1/git — list git operations with optional filters.
+    ///
+    /// Supports optional session_id, operation_type, and limit parameters.
+    pub async fn git_operations(
+        &self,
+        session_id: Option<&str>,
+        operation_type: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<GitOperation>, DaemonError> {
+        let mut params = Vec::new();
+        if let Some(sid) = session_id {
+            params.push(format!("session_id={}", urlencoded(sid)));
+        }
+        if let Some(ot) = operation_type {
+            params.push(format!("operation_type={}", urlencoded(ot)));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        let path = if params.is_empty() {
+            "/v1/git".to_string()
+        } else {
+            format!("/v1/git?{}", params.join("&"))
+        };
+        self.get(&path).await
+    }
+
+    /// GET /v1/artifacts/{session_id} — combined session artifacts.
+    ///
+    /// Returns files, git operations, and tool executions for a session.
+    pub async fn artifacts(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionArtifacts, DaemonError> {
+        let path = format!("/v1/artifacts/{}", urlencoded(session_id));
         self.get(&path).await
     }
 }

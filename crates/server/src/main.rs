@@ -1,10 +1,10 @@
 //! claude-history CLI binary.
 //!
-//! Provides the `claude-history` command with 9 subcommands for syncing JSONL
+//! Provides the `claude-history` command with 14 subcommands for syncing JSONL
 //! session files into a local SQLite database, starting the HTTP/UDS daemon,
 //! searching message content, browsing sessions, querying messages, viewing
-//! usage statistics, exporting sessions, checking Claude Code versions, and
-//! inspecting schema drift.
+//! usage statistics, exporting sessions, checking Claude Code versions,
+//! inspecting schema drift, and interacting with the artifact layer.
 //!
 //! Usage:
 //!   claude-history serve [--port 7424] [--socket /tmp/claude-history.sock]
@@ -16,6 +16,11 @@
 //!   claude-history export <session-id> [--format json|markdown|csv]
 //!   claude-history version-check [--json]
 //!   claude-history schema-drift [--record-type <type>] [--limit N] [--json]
+//!   claude-history files [--session-id <id>] [--path <substr>] [--limit N] [--json]
+//!   claude-history file-history <path> [--session-id <id>] [--limit N] [--json]
+//!   claude-history reconstruct <path> --session-id <id> [--at <uuid>]
+//!   claude-history git-log [--session-id <id>] [--type <type>] [--limit N] [--json]
+//!   claude-history artifacts <session-id> [--json]
 //!
 //! All subcommands share a global --db-path option. Logs go to stderr,
 //! structured output to stdout (PAT-020).
@@ -161,6 +166,69 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// List files touched by Claude Code across sessions
+    Files {
+        /// Filter by session ID
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Filter by path substring
+        #[arg(long)]
+        path: Option<String>,
+        /// Maximum results
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show chronological operations on a file
+    FileHistory {
+        /// File path to show history for
+        path: String,
+        /// Filter by session ID
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Maximum operations to show
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reconstruct file content at a point in time
+    Reconstruct {
+        /// File path to reconstruct
+        path: String,
+        /// Session ID (required -- reconstruction is per-session)
+        #[arg(long)]
+        session_id: String,
+        /// Stop reconstruction at this message UUID
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// Show git operations extracted from Bash tool calls
+    GitLog {
+        /// Filter by session ID
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Filter by git operation type (commit, push, checkout, etc.)
+        #[arg(long = "type")]
+        operation_type: Option<String>,
+        /// Maximum operations to show
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show combined file and git artifacts for a session
+    Artifacts {
+        /// Session ID to show artifacts for
+        session_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Resolve the database file path.
@@ -292,6 +360,32 @@ async fn main() -> ExitCode {
                     limit,
                     json,
                 } => run_schema_drift(mode, record_type, limit, json).await,
+                Commands::Files {
+                    session_id,
+                    path,
+                    limit,
+                    json,
+                } => run_files(mode, session_id, path, limit, json).await,
+                Commands::FileHistory {
+                    path,
+                    session_id,
+                    limit,
+                    json,
+                } => run_file_history(mode, path, session_id, limit, json).await,
+                Commands::Reconstruct {
+                    path,
+                    session_id,
+                    at,
+                } => run_reconstruct(mode, path, session_id, at).await,
+                Commands::GitLog {
+                    session_id,
+                    operation_type,
+                    limit,
+                    json,
+                } => run_git_log(mode, session_id, operation_type, limit, json).await,
+                Commands::Artifacts { session_id, json } => {
+                    run_artifacts(mode, session_id, json).await
+                }
                 // Serve and Sync already handled above.
                 Commands::Serve { .. } | Commands::Sync { .. } => unreachable!(),
             }
@@ -1035,6 +1129,323 @@ async fn run_schema_drift(
                 field_display, rt_display, version_display, first_seen_display, sample_display
             );
         }
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// List files touched by Claude Code across sessions.
+///
+/// [CLI-10, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::artifact_queries::list_files. Output format
+/// is identical regardless of data source.
+async fn run_files(
+    mode: ConnectionMode,
+    session_id: Option<String>,
+    path: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing files through daemon"
+            );
+            match client
+                .files(session_id.as_deref(), path.as_deref(), Some(limit))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon files query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            match conn
+                .call(move |conn| {
+                    claude_history_store::artifact_queries::list_files(
+                        conn,
+                        session_id.as_deref(),
+                        path.as_deref(),
+                        limit,
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Files query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_files_table(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Show chronological operations on a file.
+///
+/// [CLI-11, CLI-15] Routes through daemon HTTP API when available (not yet
+/// supported -- daemon does not expose a direct file-history-by-path endpoint),
+/// otherwise uses direct DB access via store::artifact_queries::query_file_operations.
+/// In v1 this always uses direct DB mode for simplicity. Output format is
+/// identical regardless of data source.
+async fn run_file_history(
+    mode: ConnectionMode,
+    path: String,
+    session_id: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    // File history by path is not directly exposed via daemon API in v1.
+    // Use direct DB mode. If daemon mode is active, open the DB anyway.
+    let conn = match mode {
+        ConnectionMode::Direct { conn, .. } => conn,
+        ConnectionMode::Daemon(_) => {
+            // Fall back to direct DB for file history queries.
+            let db_path = match resolve_db_path(None) {
+                Some(p) => p,
+                None => {
+                    eprintln!("Error: Could not determine database path for file-history.");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match claude_history_store::db::init_db(&db_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: Failed to open database: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    let p = path.clone();
+    let results = match conn
+        .call(move |conn| {
+            claude_history_store::artifact_queries::query_file_operations(
+                conn,
+                &p,
+                session_id.as_deref(),
+                limit,
+            )
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: File history query failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    eprintln!("{} operation(s) for \"{}\"", results.len(), path);
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_file_operations(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Reconstruct file content at a point in time.
+///
+/// [CLI-12] Uses direct DB access only (reconstruction requires sequential
+/// operation replay best done locally). Calls
+/// artifact_queries::reconstruct_file_content and prints the raw content
+/// to stdout. Prints diagnostic to stderr if no content can be reconstructed.
+async fn run_reconstruct(
+    mode: ConnectionMode,
+    path: String,
+    session_id: String,
+    at: Option<String>,
+) -> ExitCode {
+    // Reconstruction always uses direct DB for v1.
+    let conn = match mode {
+        ConnectionMode::Direct { conn, .. } => conn,
+        ConnectionMode::Daemon(_) => {
+            let db_path = match resolve_db_path(None) {
+                Some(p) => p,
+                None => {
+                    eprintln!("Error: Could not determine database path for reconstruct.");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match claude_history_store::db::init_db(&db_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: Failed to open database: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    let p = path.clone();
+    let sid = session_id.clone();
+    let result = match conn
+        .call(move |conn| {
+            claude_history_store::artifact_queries::reconstruct_file_content(
+                conn,
+                &p,
+                &sid,
+                at.as_deref(),
+            )
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Reconstruction failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match result {
+        Some(content) => {
+            print!("{}", content);
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!(
+                "No reconstructable content for \"{}\" in session {}",
+                path, session_id
+            );
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Show git operations extracted from Bash tool calls.
+///
+/// [CLI-13, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::artifact_queries::list_git_operations.
+/// Output format is identical regardless of data source.
+async fn run_git_log(
+    mode: ConnectionMode,
+    session_id: Option<String>,
+    operation_type: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing git-log through daemon"
+            );
+            match client
+                .git_operations(
+                    session_id.as_deref(),
+                    operation_type.as_deref(),
+                    Some(limit),
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon git-log query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            match conn
+                .call(move |conn| {
+                    claude_history_store::artifact_queries::list_git_operations(
+                        conn,
+                        session_id.as_deref(),
+                        operation_type.as_deref(),
+                        limit,
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Git log query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_git_operations(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Show combined file and git artifacts for a session.
+///
+/// [CLI-14, CLI-15] Routes through daemon HTTP API when available, otherwise
+/// uses direct DB access via store::artifact_queries::query_session_artifacts.
+/// Output format is identical regardless of data source.
+async fn run_artifacts(
+    mode: ConnectionMode,
+    session_id: String,
+    json: bool,
+) -> ExitCode {
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing artifacts through daemon"
+            );
+            match client.artifacts(&session_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon artifacts query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            match conn
+                .call(move |conn| {
+                    claude_history_store::artifact_queries::query_session_artifacts(
+                        conn,
+                        &session_id,
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Artifacts query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_artifacts(&results);
     }
 
     ExitCode::SUCCESS
