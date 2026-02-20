@@ -1,11 +1,13 @@
 //! claude-history CLI binary.
 //!
-//! Provides the `claude-history` command with 8 subcommands for syncing JSONL
-//! session files into a local SQLite database, searching message content,
-//! browsing sessions, querying messages, viewing usage statistics, exporting
-//! sessions, checking Claude Code versions, and inspecting schema drift.
+//! Provides the `claude-history` command with 9 subcommands for syncing JSONL
+//! session files into a local SQLite database, starting the HTTP/UDS daemon,
+//! searching message content, browsing sessions, querying messages, viewing
+//! usage statistics, exporting sessions, checking Claude Code versions, and
+//! inspecting schema drift.
 //!
 //! Usage:
+//!   claude-history serve [--port 7424] [--socket /tmp/claude-history.sock]
 //!   claude-history sync [--projects-dir <path>] [--db-path <path>]
 //!   claude-history search <query> [--limit N] [--json]
 //!   claude-history sessions [--project <path>] [--after <date>] [--before <date>] [--limit N] [--json]
@@ -21,6 +23,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -45,6 +48,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start the HTTP API daemon (TCP + Unix domain socket)
+    Serve {
+        /// TCP port to listen on. Defaults to 7424.
+        #[arg(long, default_value = "7424")]
+        port: u16,
+        /// Unix domain socket path. Defaults to $CLAUDE_HISTORY_SOCKET or /tmp/claude-history.sock.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Sync JSONL session files into the database
     Sync {
         /// Path to Claude Code projects directory.
@@ -196,6 +208,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Serve { port, socket } => run_serve(cli.db_path, port, socket).await,
         Commands::Sync { projects_dir } => run_sync(projects_dir, cli.db_path).await,
         Commands::Search { query, limit, json } => {
             run_search(cli.db_path, query, limit, json).await
@@ -339,6 +352,80 @@ async fn open_db(db_path_arg: Option<PathBuf>) -> Option<tokio_rusqlite::Connect
                 e
             );
             None
+        }
+    }
+}
+
+/// Start the HTTP API daemon on TCP and Unix domain socket.
+///
+/// [CLI-01] Opens the database, builds SharedState, resolves the socket path
+/// (from --socket arg, then CLAUDE_HISTORY_SOCKET env, then default), and
+/// calls serve::run_server which blocks until shutdown signal (SIGINT/SIGTERM).
+async fn run_serve(
+    db_path_arg: Option<PathBuf>,
+    port: u16,
+    socket_arg: Option<PathBuf>,
+) -> ExitCode {
+    // Resolve database path and open connection
+    let db_path = match resolve_db_path(db_path_arg) {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: Could not determine database path. Set CLAUDE_HISTORY_DB_PATH or HOME environment variable, or pass --db-path.");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !db_path.exists() {
+        eprintln!(
+            "Error: Database file does not exist: {}\n\
+             Run `claude-history sync` first to create the database.",
+            db_path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let conn = match claude_history_store::db::init_db(&db_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Error: Failed to open database at {}: {}",
+                db_path.display(),
+                e
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Build shared application state
+    let state = Arc::new(state::AppState {
+        conn,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        db_path: db_path.clone(),
+    });
+
+    // Resolve socket path: --socket arg > $CLAUDE_HISTORY_SOCKET > default
+    let socket_path = socket_arg
+        .or_else(|| {
+            std::env::var("CLAUDE_HISTORY_SOCKET")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| PathBuf::from("/tmp/claude-history.sock"));
+
+    tracing::info!(
+        port = port,
+        socket = %socket_path.display(),
+        db = %db_path.display(),
+        version = %env!("CARGO_PKG_VERSION"),
+        "Starting claude-history daemon"
+    );
+
+    match serve::run_server(state, port, socket_path).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: Server failed: {}", e);
+            ExitCode::FAILURE
         }
     }
 }
