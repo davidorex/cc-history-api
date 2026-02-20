@@ -1,0 +1,48 @@
+{
+  "plan_path": ".planning/phases/05-artifact-layer/05-02-PLAN.md",
+  "plan_name": "Artifact Decomposer",
+  "phase": "05-artifact-layer",
+  "plan_prefix": "05-02",
+  "status": "complete",
+  "tasks": [
+    {
+      "name": "Create artifacts.rs with decompose_artifacts and all extraction functions",
+      "status": "complete",
+      "commit_hash": "4c1e66c",
+      "commit_type": "feat",
+      "notes": "1178 lines. 12 tests. Includes pub mod artifacts in lib.rs (needed for test discoverability). Fixed file_cmd_regex consuming && separator."
+    },
+    {
+      "name": "Wire decompose_artifacts into decompose_record and register module in lib.rs",
+      "status": "complete",
+      "commit_hash": "1258ea7",
+      "commit_type": "feat",
+      "notes": "Second-pass call added after match block. Also fixed db.rs test hardcoding 2 migration versions (now 3)."
+    }
+  ],
+  "decisions": [],
+  "issues_logged": [],
+  "deviations": [
+    {
+      "rule": 1,
+      "type": "bug",
+      "description": "file_cmd_regex consumed && separator, preventing subsequent chained commands from matching. Changed regex to non-consuming pattern using character class [;&] instead of alternation group.",
+      "task": 1,
+      "files": ["crates/store/src/artifacts.rs"]
+    },
+    {
+      "rule": 1,
+      "type": "bug",
+      "description": "db::tests::test_init_db_creates_schema_and_sets_pragmas hardcoded 2 migration versions but migration 003 was added in 05-01. Updated assertion to 3.",
+      "task": 2,
+      "files": ["crates/store/src/db.rs"]
+    },
+    {
+      "rule": 3,
+      "type": "blocking",
+      "description": "lib.rs pub mod artifacts declaration moved from Task 2 to Task 1 because artifacts.rs tests are only compiled when the module is declared in lib.rs. Task 1 verification requires tests to pass.",
+      "task": 1,
+      "files": ["crates/store/src/lib.rs"]
+    }
+  ]
+}

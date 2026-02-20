@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 5 of 6 (Artifact Layer) -- IN PROGRESS
-Plan: 1 of 8 complete in current phase
-Status: Plan 05-01 (Migration & Deps) complete. Wave 1 done. Wave 2 ready.
-Last activity: 2026-02-20 -- Completed 05-01-PLAN.md (migration 003, workspace deps)
+Plan: 2 of 8 complete in current phase
+Status: Plan 05-02 (Artifact Decomposer) complete. Wave 2 in progress (Plans 03-04 ready).
+Last activity: 2026-02-20 -- Completed 05-02-PLAN.md (artifact decomposer, decompose pipeline wiring)
 
-Progress: [████████░░] ~70% (16 of ~23 total plans)
+Progress: [████████░░] ~74% (17 of ~23 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 16
-- Average duration: ~5.8 min
-- Total execution time: ~1.5 hours
+- Total plans completed: 17
+- Average duration: ~5.7 min
+- Total execution time: ~1.6 hours
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [████████░░] ~70% (16 of ~23 total plans)
 | 02 | 3/3 | 22 min | 7.3 min |
 | 03 | 6/6 | ~30 min | ~5 min |
 | 04 | 2/2 | 8 min | 4 min |
-| 05 | 1/8 | 2 min | 2 min |
+| 05 | 2/8 | 7 min | 3.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 5, 4, 3, 5, 2 min
-- Trend: 05-01 Migration & deps completed in 2 min — no deviations
+- Last 5 plans: 4, 3, 5, 2, 5 min
+- Trend: 05-02 Artifact Decomposer completed in 5 min — 3 auto-fixed deviations (regex bug, stale test assertion, module registration ordering)
 
 *Updated after each plan completion*
 
@@ -89,6 +89,9 @@ Recent decisions affecting current work:
 - [04-02]: Removed clap env attribute for projects_dir — derive feature alone does not include env support; handled via resolve_projects_dir with explicit CLAUDE_PROJECTS_DIR env check
 - [04-02]: Watcher startup failure logs warning and continues — live ingestion is optional for basic daemon operation
 - [04-02]: Oneshot channel propagates watcher setup errors from spawned thread back to caller
+- [05-02]: lib.rs pub mod artifacts moved from Task 2 to Task 1 — tests require module registration to compile
+- [05-02]: Composite tool_use_id (tool_use_id:bash:cmd:path) for Bash file-touching commands producing multiple file_operations rows from single tool_use
+- [05-02]: file_cmd_regex uses [;&] character class instead of alternation — avoids consuming && separators needed by subsequent matches
 
 ### Pending Todos
 
@@ -101,5 +104,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 5, Plan 01 complete. Wave 2 (Plans 02-04) ready for execution.
+Stopped at: Phase 5, Plan 02 complete. Wave 2 continues (Plans 03-04 ready).
 Resume file: /gsd:execute-phase 5
