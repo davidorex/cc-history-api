@@ -25,8 +25,10 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod api;
 mod export;
 mod output;
+mod state;
 
 #[derive(Parser)]
 #[command(name = "claude-history", about = "Claude Code session history API")]
