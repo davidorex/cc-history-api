@@ -253,6 +253,22 @@ fn decompose_content_block(
                 ],
             )?;
             rows += changed;
+
+            // ART-04: Link tool_result to its tool_use by populating result_content.
+            // The tool_executions row was created during assistant record decomposition
+            // with the same tool_use_id. Now we populate its result fields.
+            // The UPDATE matches on tool_use_id alone because the tool_executions row
+            // belongs to the assistant message, not this user message.
+            // Safe even if no matching row exists (0 rows affected).
+            let result_str = serde_json::to_string(content)?;
+            tx.execute(
+                "UPDATE tool_executions SET result_content = ?1, is_error = ?2 WHERE tool_use_id = ?3",
+                rusqlite::params![
+                    result_str,
+                    is_error.map(|v| v as i32),
+                    tool_use_id
+                ],
+            )?;
         }
     }
 
@@ -1225,6 +1241,96 @@ mod tests {
             )
             .unwrap();
         assert_eq!(block_type, "tool_result");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9b: Tool result matching — tool_result UPDATE populates
+    //          tool_executions.result_content and is_error via tool_use_id
+    //          [ART-04]
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_tool_result_updates_tool_executions() {
+        let conn = setup_db();
+
+        // Step 1: Decompose an assistant record with a tool_use block.
+        // This creates the tool_executions row with result_content = NULL.
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let assistant = AssistantRecord {
+                base: test_base("assist-tr", "sess-tr"),
+                message: AssistantMessage {
+                    id: "msg_tr".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "tool-tr-001".to_string(),
+                        name: "Read".to_string(),
+                        input: serde_json::json!({"file_path": "/tmp/test.txt"}),
+                        caller: None,
+                    }],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                    overflow: HashMap::new(),
+                },
+                request_id: None,
+                is_api_error_message: None,
+                error: None,
+                overflow: HashMap::new(),
+            };
+            decompose_assistant(&assistant, &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Verify tool_executions row exists with NULL result_content
+        let result_before: Option<String> = conn
+            .query_row(
+                "SELECT result_content FROM tool_executions WHERE tool_use_id = 'tool-tr-001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(result_before.is_none(), "result_content should be NULL before tool_result");
+
+        // Step 2: Decompose a user record with a tool_result block referencing
+        // the same tool_use_id. This should UPDATE the tool_executions row.
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let user = UserRecord {
+                base: test_base("user-tr", "sess-tr"),
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "tool-tr-001".to_string(),
+                        content: serde_json::json!("File contents: hello world"),
+                        is_error: Some(false),
+                    }]),
+                },
+                source_tool_assistant_uuid: Some("assist-tr".to_string()),
+                tool_use_result: None,
+                thinking_metadata: None,
+                todos: None,
+                permission_mode: None,
+                overflow: HashMap::new(),
+            };
+            decompose_user(&user, &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Verify tool_executions row now has result_content populated
+        let (result_content, is_error): (String, i32) = conn
+            .query_row(
+                "SELECT result_content, is_error FROM tool_executions WHERE tool_use_id = 'tool-tr-001'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            result_content.contains("hello world"),
+            "result_content should contain the tool result, got: {}",
+            result_content
+        );
+        assert_eq!(is_error, 0, "is_error should be 0 (false)");
     }
 
     // -----------------------------------------------------------------------
