@@ -1,3 +1,4 @@
+pub mod artifact_queries;
 pub mod artifacts;
 pub mod db;
 pub mod decompose;
