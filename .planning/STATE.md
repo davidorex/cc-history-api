@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 1 of 6 (Core Types and Ingestion Pipeline)
-Plan: 2 of 4 complete in current phase
-Status: Executing — 01-01 complete (workspace+schema), 01-02 complete (serde types+parser), 01-03 next (decomposition+drift)
-Last activity: 2026-02-20 -- Completed 01-02: Serde types for all 7 JSONL record types with overflow capture, streaming JSONL parser with byte-offset tracking
+Plan: 3 of 4 complete in current phase
+Status: Executing — 01-01 complete (workspace+schema), 01-02 complete (serde types+parser), 01-03 complete (decomposition+drift), 01-04 next (sync+CLI)
+Last activity: 2026-02-20 -- Completed 01-03: Record decomposition engine for all 7 JSONL types + schema drift logger with overflow capture
 
-Progress: [██░░░░░░░░] ~13% (2 of ~15 total plans)
+Progress: [███░░░░░░░] ~20% (3 of ~15 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 6.5 min
-- Total execution time: 0.2 hours
+- Total plans completed: 3
+- Average duration: 6 min
+- Total execution time: 0.3 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 2/4 | 13 min | 6.5 min |
+| 01 | 3/4 | 18 min | 6 min |
 
 **Recent Trend:**
-- Last 5 plans: 7, 6 min
-- Trend: stable
+- Last 5 plans: 7, 6, 5 min
+- Trend: stable/improving
 
 *Updated after each plan completion*
 
@@ -51,6 +51,9 @@ Recent decisions affecting current work:
 - [01-02]: RecordBase has no overflow HashMap — only ONE overflow per struct at outermost level to avoid serde(flatten) ambiguity
 - [01-02]: ProgressRecord data stored as serde_json::Value — 8+ data.type variants too varied for Phase 1 typed modeling
 - [01-02]: Parser error model: ParseError for file-level I/O, ParseWarning for line-level deser failures — malformed lines never halt parsing
+- [01-03]: drift.rs co-committed with decompose.rs — compile-time dependency (decompose imports drift::log_overflow) prevented separate commits
+- [01-03]: Qualified record_type names for assistant overflow maps: 'assistant', 'assistant.message', 'assistant.message.usage' — enables per-layer drift analysis
+- [01-03]: file_history_snapshot decomposition skips with debug log — no target table in Phase 1 schema
 
 ### Pending Todos
 
@@ -64,5 +67,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: 01-02 finalized, 01-03 next
-Resume file: .planning/phases/01-core-types-and-ingestion-pipeline/01-03-PLAN.md
+Stopped at: 01-03 finalized, 01-04 next
+Resume file: .planning/phases/01-core-types-and-ingestion-pipeline/01-04-PLAN.md
