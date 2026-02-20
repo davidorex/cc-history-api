@@ -1,0 +1,34 @@
+{
+  "plan_path": ".planning/phases/05-artifact-layer/05-04-PLAN.md",
+  "plan_name": "Artifact Query Layer",
+  "phase": "05-artifact-layer",
+  "plan_prefix": "05-04",
+  "status": "complete",
+  "tasks": [
+    {
+      "name": "Create artifact_queries.rs with all query, reconstruction, and diff functions",
+      "status": "complete",
+      "commit_hash": "39768f9",
+      "commit_type": "feat",
+      "notes": "Co-committed with Task 2 (lib.rs registration) because tests require module registration to compile. 10 query functions, 6 result structs, 7 tests. All tests pass."
+    },
+    {
+      "name": "Register artifact_queries module in lib.rs",
+      "status": "complete",
+      "commit_hash": "39768f9",
+      "commit_type": "feat",
+      "notes": "Co-committed with Task 1 per same rationale as decision [05-02]: tests require module registration"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "05-04-01",
+      "description": "lib.rs pub mod artifact_queries co-committed with artifact_queries.rs creation -- tests use crate::schema which requires module registration, same pattern as decision [05-02]"
+    }
+  ],
+  "issues_logged": [],
+  "deviations": [],
+  "duration_seconds": 183,
+  "started_at": "2026-02-20T12:49:16Z",
+  "completed_at": "2026-02-20T12:52:19Z"
+}
