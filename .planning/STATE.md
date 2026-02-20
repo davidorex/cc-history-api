@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 3 of 6 (HTTP API and Daemon) — IN PROGRESS
-Plan: 3 of 6 complete in current phase — all 16 API endpoint handlers done, finalized
-Status: Plan 03-03 finalized. All 16 /v1/ endpoint handlers implemented and documented. Plan 03-04 next (dual-listener serve infrastructure).
-Last activity: 2026-02-20 -- Plan 03-03 finalized (summary written, metadata committed)
+Plan: 4 of 6 complete in current phase — dual-listener serve infrastructure done
+Status: Plan 03-04 complete. claude-history serve binds TCP on 127.0.0.1:7424 and UDS on /tmp/claude-history.sock with CancellationToken-based graceful shutdown. Plan 03-05 next.
+Last activity: 2026-02-20 -- Plan 03-04 executed (serve.rs + CLI Serve command)
 
-Progress: [█████░░░░░] ~53% (10 of ~19 total plans)
+Progress: [██████░░░░] ~58% (11 of ~19 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
+- Total plans completed: 11
 - Average duration: ~7 min
-- Total execution time: ~1.1 hours
+- Total execution time: ~1.2 hours
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [█████░░░░░] ~53% (10 of ~19 total plans)
 |-------|-------|-------|----------|
 | 01 | 4/4 | 28 min | 7 min |
 | 02 | 3/3 | 22 min | 7.3 min |
-| 03 | 3/6 | ~16 min | ~5.3 min |
+| 03 | 4/6 | ~21 min | ~5.3 min |
 
 **Recent Trend:**
-- Last 5 plans: 12, 6, 5, 6, 5 min
-- Trend: 03-03 handler creation continues to be straightforward — established patterns reused consistently
+- Last 5 plans: 6, 5, 6, 5, 5 min
+- Trend: 03-04 serve infrastructure implemented cleanly — CancellationToken lifetime issue was the only deviation from plan pseudocode
 
 *Updated after each plan completion*
 
@@ -74,6 +74,7 @@ Recent decisions affecting current work:
 - [03-02]: Used axum 0.8 path parameter syntax ({id}) instead of :id — axum 0.8 requires curly-brace syntax
 - [03-02]: search handler validates non-empty q parameter, returns 400 BadRequest — exercises the previously-unused BadRequest variant
 - [03-03]: Export handler maps Box<dyn Error> to string then wraps in rusqlite::Error::ToSqlConversionFailure — original error type lacks Send+Sync bounds required by the rusqlite error variant
+- [03-04]: CancellationToken::cancelled() requires async move wrapper for 'static lifetime in tokio::spawn — with_graceful_shutdown(token.cancelled()) fails because cancelled() borrows the token, but spawned tasks need 'static
 
 ### Pending Todos
 
@@ -86,5 +87,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Plan 03-03 finalized, ready for 03-04
-Resume file: .planning/phases/03-http-api-and-daemon/03-04-PLAN.md (next plan)
+Stopped at: Plan 03-04 complete, ready for 03-05
+Resume file: .planning/phases/03-http-api-and-daemon/03-05-PLAN.md (next plan)
