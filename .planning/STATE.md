@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 1 - Core Types and Ingestion Pipeline
+**Current focus:** Phase 2 - Full-Text Search and CLI
 
 ## Current Position
 
-Phase: 1 of 6 (Core Types and Ingestion Pipeline) — COMPLETE
-Plan: 4 of 4 complete in current phase
-Status: Phase 1 complete — all 4 plans executed, all 5 spec success criteria verified against real data. Phase 2 not yet planned.
-Last activity: 2026-02-20 -- Completed 01-04: Sync engine + CLI sync subcommand, 768K records ingested from real data, incremental sync verified
+Phase: 2 of 6 (Full-Text Search and CLI) — PLANNED
+Plan: 0 of 3 complete in current phase
+Status: Phase 2 planned — 3 plans (FTS5+store queries, CLI search/sessions/query/stats, CLI export/version/drift). Ready for execution.
+Last activity: 2026-02-20 -- Phase 2 planned with 3 plans in 3 sequential waves
 
 Progress: [███░░░░░░░] ~27% (4 of ~15 total plans)
 
@@ -62,11 +62,10 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 1 requires empirical analysis of real JSONL session files from ~/.claude/projects/ to drive type modeling -- the schema is undocumented
-- tokio-rusqlite vs spawn_blocking ergonomic tradeoff to be assessed early in Phase 1
+- FTS-02 (file_operations FTS index) deferred to Phase 5 — file_operations table does not exist until Phase 5 (Artifact Layer). Phase 2 SC-1 is partially satisfied for message content only.
 
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 1 complete (all 4 plans finalized), Phase 2 not yet planned
-Resume file: .planning/ROADMAP.md (Phase 2 planning needed)
+Stopped at: Phase 2 planned (3 plans created), ready for execution
+Resume file: .planning/phases/02-full-text-search-and-cli/02-01-PLAN.md

@@ -206,7 +206,7 @@ Deferred to future release. Tracked but not in current roadmap.
 | INFRA-03 | Phase 1 | Pending |
 | INFRA-07 | Phase 1 | Pending |
 | FTS-01 | Phase 2 | Pending |
-| FTS-02 | Phase 2 | Pending |
+| FTS-02 | Phase 5 | Pending |
 | FTS-03 | Phase 2 | Pending |
 | CLI-02 | Phase 2 | Pending |
 | CLI-03 | Phase 2 | Pending |

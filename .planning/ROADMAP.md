@@ -42,9 +42,10 @@ Plans:
 ### Phase 2: Full-Text Search and CLI
 **Goal**: Users can search across all ingested session content and interact with their history through a complete CLI that answers questions about sessions, messages, tokens, and tools
 **Depends on**: Phase 1
-**Requirements**: FTS-01, FTS-02, FTS-03, CLI-02, CLI-03, CLI-04, CLI-05, CLI-06, CLI-07, CLI-08, CLI-09
+**Requirements**: FTS-01, FTS-03, CLI-02, CLI-03, CLI-04, CLI-05, CLI-06, CLI-07, CLI-08, CLI-09
+**Note**: FTS-02 (file_operations FTS index) moved to Phase 5 — the file_operations table it indexes is created there.
 **Success Criteria** (what must be TRUE):
-  1. `claude-history search "some phrase"` returns ranked results from across all sessions, matching against message content and file operation content via FTS5
+  1. `claude-history search "some phrase"` returns ranked results from across all sessions, matching against message content via FTS5 (file operation content search extends this in Phase 5 when FTS-02 and the file_operations table are created)
   2. `claude-history sessions` lists sessions with filters (project, date range, status) and `claude-history stats` shows token usage, tool frequency, and model breakdown
   3. `claude-history export <session-id>` produces valid JSON, Markdown, or CSV output of a complete session conversation
   4. `claude-history query` accepts filter arguments and outputs matching messages as JSON to stdout
@@ -90,7 +91,7 @@ Plans:
 ### Phase 5: Artifact Layer
 **Goal**: Users can query what files Claude Code touched, what git operations it performed, reconstruct file content at any point in a session, and view a unified timeline of all artifacts produced
 **Depends on**: Phase 4
-**Requirements**: ART-01, ART-02, ART-03, ART-04, ART-05, ART-06, ART-07, ART-08, ART-09, ART-10, ART-11, API-17, API-18, API-19, API-20, API-21, API-22, API-23, API-24, API-25, API-26, API-27, CLI-10, CLI-11, CLI-12, CLI-13, CLI-14, SSE-06, SSE-07
+**Requirements**: FTS-02, ART-01, ART-02, ART-03, ART-04, ART-05, ART-06, ART-07, ART-08, ART-09, ART-10, ART-11, API-17, API-18, API-19, API-20, API-21, API-22, API-23, API-24, API-25, API-26, API-27, CLI-10, CLI-11, CLI-12, CLI-13, CLI-14, SSE-06, SSE-07
 **Success Criteria** (what must be TRUE):
   1. `claude-history files` lists every file touched by Claude Code across sessions, and `claude-history file-history <path>` shows the chronological Write/Edit/Read operations on that file with content
   2. `claude-history reconstruct <file-path> --at <message-uuid>` replays writes and edits to produce the file's content as it existed at that point in the session
@@ -126,7 +127,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
-| 2. Full-Text Search and CLI | 0/3 | Not started | - |
+| 2. Full-Text Search and CLI | 0/3 | Planned | - |
 | 3. HTTP API and Daemon | 0/3 | Not started | - |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
 | 5. Artifact Layer | 0/3 | Not started | - |
