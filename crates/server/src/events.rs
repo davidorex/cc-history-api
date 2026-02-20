@@ -1,8 +1,11 @@
 //! SSE event types and handler for the GET /v1/events endpoint.
 //!
-//! Defines the `SseEvent` enum representing the four event types emitted by the
-//! system (record:added, session:started, schema:drift, version:changed) and the
-//! `events_handler` function that subscribes to the broadcast channel and streams
+//! Defines the `SseEvent` enum representing the seven event types emitted by the
+//! system:
+//!   - record:added, session:started, schema:drift, version:changed (Phase 4)
+//!   - file:written, file:edited, git:commit (Phase 5 artifact events)
+//!
+//! The `events_handler` function subscribes to the broadcast channel and streams
 //! events to connected SSE clients.
 //!
 //! The broadcast channel in AppState allows fan-out to multiple concurrent SSE
@@ -10,7 +13,7 @@
 //! Slow consumers that fall behind the channel capacity (1024) will have lagged
 //! events silently dropped rather than blocking the producer.
 //!
-//! Requirement IDs: SSE-01, SSE-02, SSE-03, SSE-04, SSE-05
+//! Requirement IDs: SSE-01, SSE-02, SSE-03, SSE-04, SSE-05, SSE-06, SSE-07
 
 use std::convert::Infallible;
 
@@ -22,7 +25,7 @@ use tokio_stream::StreamExt;
 
 use crate::state::SharedState;
 
-/// Server-Sent Event variants matching the four spec event types.
+/// Server-Sent Event variants matching the seven spec event types.
 ///
 /// Each variant maps to a distinct SSE `event:` name via `event_type()` and
 /// carries structured data serialized as the SSE `data:` payload via
@@ -54,19 +57,42 @@ pub enum SseEvent {
         new_version: String,
         session_id: String,
     },
+    /// A file was written or created via Write tool [SSE-06]
+    FileWritten {
+        session_id: String,
+        file_path: String,
+        message_uuid: String,
+    },
+    /// A file was edited via Edit tool [SSE-06]
+    FileEdited {
+        session_id: String,
+        file_path: String,
+        message_uuid: String,
+    },
+    /// A git commit was extracted from a Bash tool call [SSE-07]
+    GitCommit {
+        session_id: String,
+        commit_message: Option<String>,
+        branch: Option<String>,
+        message_uuid: String,
+    },
 }
 
 impl SseEvent {
     /// Return the SSE event type name (the `event:` field in the SSE frame).
     ///
     /// These names match the spec requirement identifiers exactly:
-    /// record:added, session:started, schema:drift, version:changed.
+    /// record:added, session:started, schema:drift, version:changed,
+    /// file:written, file:edited, git:commit.
     pub fn event_type(&self) -> &'static str {
         match self {
             SseEvent::RecordAdded { .. } => "record:added",
             SseEvent::SessionStarted { .. } => "session:started",
             SseEvent::SchemaDrift { .. } => "schema:drift",
             SseEvent::VersionChanged { .. } => "version:changed",
+            SseEvent::FileWritten { .. } => "file:written",
+            SseEvent::FileEdited { .. } => "file:edited",
+            SseEvent::GitCommit { .. } => "git:commit",
         }
     }
 
@@ -104,6 +130,35 @@ impl SseEvent {
                 "old_version": old_version,
                 "new_version": new_version,
                 "session_id": session_id,
+            }),
+            SseEvent::FileWritten {
+                session_id,
+                file_path,
+                message_uuid,
+            } => serde_json::json!({
+                "session_id": session_id,
+                "file_path": file_path,
+                "message_uuid": message_uuid,
+            }),
+            SseEvent::FileEdited {
+                session_id,
+                file_path,
+                message_uuid,
+            } => serde_json::json!({
+                "session_id": session_id,
+                "file_path": file_path,
+                "message_uuid": message_uuid,
+            }),
+            SseEvent::GitCommit {
+                session_id,
+                commit_message,
+                branch,
+                message_uuid,
+            } => serde_json::json!({
+                "session_id": session_id,
+                "commit_message": commit_message,
+                "branch": branch,
+                "message_uuid": message_uuid,
             }),
         }
     }
