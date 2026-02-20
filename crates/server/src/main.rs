@@ -1,8 +1,9 @@
 //! claude-history CLI binary.
 //!
-//! Provides the `claude-history` command with subcommands for syncing JSONL
+//! Provides the `claude-history` command with 8 subcommands for syncing JSONL
 //! session files into a local SQLite database, searching message content,
-//! browsing sessions, querying messages, and viewing usage statistics.
+//! browsing sessions, querying messages, viewing usage statistics, exporting
+//! sessions, checking Claude Code versions, and inspecting schema drift.
 //!
 //! Usage:
 //!   claude-history sync [--projects-dir <path>] [--db-path <path>]
@@ -10,16 +11,21 @@
 //!   claude-history sessions [--project <path>] [--after <date>] [--before <date>] [--limit N] [--json]
 //!   claude-history query [--session-id <id>] [--type <type>] [--model <m>] [--tool <t>] [--limit N]
 //!   claude-history stats [--session-id <id>] [--json]
+//!   claude-history export <session-id> [--format json|markdown|csv]
+//!   claude-history version-check [--json]
+//!   claude-history schema-drift [--record-type <type>] [--limit N] [--json]
 //!
 //! All subcommands share a global --db-path option. Logs go to stderr,
 //! structured output to stdout (PAT-020).
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod export;
 mod output;
 
 #[derive(Parser)]
@@ -105,6 +111,14 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Export a complete session conversation
+    Export {
+        /// Session ID to export
+        session_id: String,
+        /// Output format: json, markdown, csv
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
 }
 
 /// Resolve the database file path.
@@ -182,6 +196,9 @@ async fn main() -> ExitCode {
             limit,
         } => run_query(cli.db_path, session_id, message_type, model, tool, after, before, limit).await,
         Commands::Stats { session_id, json } => run_stats(cli.db_path, session_id, json).await,
+        Commands::Export { session_id, format } => {
+            run_export(cli.db_path, session_id, format).await
+        }
     }
 }
 
@@ -499,4 +516,70 @@ async fn run_stats(
     }
 
     ExitCode::SUCCESS
+}
+
+/// Export a complete session conversation in JSON, Markdown, or CSV format.
+///
+/// [CLI-07] Validates the format argument, then delegates to the appropriate
+/// export function. The export runs inside conn.call(), writing to a Vec<u8>
+/// buffer. The buffer is then flushed to stdout outside the closure to avoid
+/// blocking the DB connection thread with I/O.
+async fn run_export(
+    db_path_arg: Option<PathBuf>,
+    session_id: String,
+    format: String,
+) -> ExitCode {
+    // Validate format before opening the database
+    let valid_formats = ["json", "markdown", "csv"];
+    if !valid_formats.contains(&format.as_str()) {
+        eprintln!(
+            "Error: Invalid format '{}'. Valid formats: json, markdown, csv",
+            format
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let conn = match open_db(db_path_arg).await {
+        Some(c) => c,
+        None => return ExitCode::FAILURE,
+    };
+
+    let fmt = format.clone();
+    let sid = session_id.clone();
+    let export_result = conn
+        .call(move |conn| {
+            let mut buffer = Vec::new();
+            let result: Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> = match fmt.as_str() {
+                "json" => export::export_json(conn, &sid, &mut buffer)
+                    .map(|()| buffer)
+                    .map_err(|e| e.to_string().into()),
+                "markdown" => export::export_markdown(conn, &sid, &mut buffer)
+                    .map(|()| buffer)
+                    .map_err(|e| e.to_string().into()),
+                "csv" => export::export_csv(conn, &sid, &mut buffer)
+                    .map(|()| buffer)
+                    .map_err(|e| e.to_string().into()),
+                _ => unreachable!("format validated above"),
+            };
+            result.map_err(|e| {
+                tokio_rusqlite::rusqlite::Error::ToSqlConversionFailure(e)
+            })
+        })
+        .await;
+
+    match export_result {
+        Ok(buffer) => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            if let Err(e) = handle.write_all(&buffer) {
+                eprintln!("Error: Failed to write export output: {}", e);
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Error: Export failed: {}", e);
+            ExitCode::FAILURE
+        }
+    }
 }
