@@ -78,7 +78,7 @@ enum Commands {
         #[arg(long)]
         session_id: Option<String>,
         /// Filter by message type (user, assistant)
-        #[arg(long, name = "type")]
+        #[arg(long = "type")]
         message_type: Option<String>,
         /// Filter by model name
         #[arg(long)]
@@ -162,10 +162,26 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Commands::Sync { projects_dir } => run_sync(projects_dir, cli.db_path).await,
-        Commands::Search { .. } => todo!("search handler — Task 2"),
-        Commands::Sessions { .. } => todo!("sessions handler — Task 2"),
-        Commands::Query { .. } => todo!("query handler — Task 2"),
-        Commands::Stats { .. } => todo!("stats handler — Task 2"),
+        Commands::Search { query, limit, json } => {
+            run_search(cli.db_path, query, limit, json).await
+        }
+        Commands::Sessions {
+            project,
+            after,
+            before,
+            limit,
+            json,
+        } => run_sessions(cli.db_path, project, after, before, limit, json).await,
+        Commands::Query {
+            session_id,
+            message_type,
+            model,
+            tool,
+            after,
+            before,
+            limit,
+        } => run_query(cli.db_path, session_id, message_type, model, tool, after, before, limit).await,
+        Commands::Stats { session_id, json } => run_stats(cli.db_path, session_id, json).await,
     }
 }
 
@@ -246,4 +262,241 @@ async fn run_sync(projects_dir_arg: Option<PathBuf>, db_path_arg: Option<PathBuf
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Open the database for read-only query subcommands.
+///
+/// Resolves the db_path and initializes the connection. Returns the async
+/// connection handle, or prints an error to stderr and returns None.
+async fn open_db(db_path_arg: Option<PathBuf>) -> Option<tokio_rusqlite::Connection> {
+    let db_path = match resolve_db_path(db_path_arg) {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: Could not determine database path. Set CLAUDE_HISTORY_DB_PATH or HOME environment variable, or pass --db-path.");
+            return None;
+        }
+    };
+
+    if !db_path.exists() {
+        eprintln!(
+            "Error: Database file does not exist: {}\n\
+             Run `claude-history sync` first to create the database.",
+            db_path.display()
+        );
+        return None;
+    }
+
+    match claude_history_store::db::init_db(&db_path).await {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            eprintln!(
+                "Error: Failed to open database at {}: {}",
+                db_path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Search message content using FTS5 full-text search.
+///
+/// [CLI-05] Calls store::fts::search_messages inside conn.call(), then
+/// formats output via output.rs based on the --json flag. Prints result
+/// count summary to stderr.
+async fn run_search(
+    db_path_arg: Option<PathBuf>,
+    query: String,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let conn = match open_db(db_path_arg).await {
+        Some(c) => c,
+        None => return ExitCode::FAILURE,
+    };
+
+    let q = query.clone();
+    let results = match conn
+        .call(move |conn| {
+            claude_history_store::fts::search_messages(conn, &q, limit, 0)
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Search failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    eprintln!("{} result(s) for \"{}\"", results.len(), query);
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_search_results(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// List sessions with optional project, date, and limit filters.
+///
+/// [CLI-04] Calls store::query::list_sessions inside conn.call(), then
+/// formats output as a table or JSON based on the --json flag.
+async fn run_sessions(
+    db_path_arg: Option<PathBuf>,
+    project: Option<String>,
+    after: Option<String>,
+    before: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let conn = match open_db(db_path_arg).await {
+        Some(c) => c,
+        None => return ExitCode::FAILURE,
+    };
+
+    let results = match conn
+        .call(move |conn| {
+            claude_history_store::query::list_sessions(
+                conn,
+                project.as_deref(),
+                after.as_deref(),
+                before.as_deref(),
+                limit,
+            )
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Sessions query failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_sessions_table(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Query messages with filters, always outputting JSON.
+///
+/// [CLI-03] Calls store::query::query_messages inside conn.call().
+/// This subcommand always outputs JSON to stdout (designed for machine
+/// consumption per spec).
+#[allow(clippy::too_many_arguments)]
+async fn run_query(
+    db_path_arg: Option<PathBuf>,
+    session_id: Option<String>,
+    message_type: Option<String>,
+    model: Option<String>,
+    tool: Option<String>,
+    after: Option<String>,
+    before: Option<String>,
+    limit: usize,
+) -> ExitCode {
+    let conn = match open_db(db_path_arg).await {
+        Some(c) => c,
+        None => return ExitCode::FAILURE,
+    };
+
+    let results = match conn
+        .call(move |conn| {
+            claude_history_store::query::query_messages(
+                conn,
+                session_id.as_deref(),
+                message_type.as_deref(),
+                model.as_deref(),
+                tool.as_deref(),
+                after.as_deref(),
+                before.as_deref(),
+                limit,
+            )
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Query failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if output::print_json(&results).is_err() {
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Show token usage, tool frequency, and model breakdown statistics.
+///
+/// [CLI-06] Runs three queries: token_stats_by_model (or by_session if
+/// --session-id provided), tool_frequency, and model_breakdown. Output is
+/// either three human-readable sections or a combined JSON object.
+async fn run_stats(
+    db_path_arg: Option<PathBuf>,
+    session_id: Option<String>,
+    json: bool,
+) -> ExitCode {
+    let conn = match open_db(db_path_arg).await {
+        Some(c) => c,
+        None => return ExitCode::FAILURE,
+    };
+
+    let sid = session_id.clone();
+    let stats_result = conn
+        .call(move |conn| -> Result<_, tokio_rusqlite::rusqlite::Error> {
+            let token_stats = if let Some(ref sid) = sid {
+                claude_history_store::query::token_stats_by_session(conn, Some(sid.as_str()))
+            } else {
+                claude_history_store::query::token_stats_by_model(conn)
+            }?;
+
+            let tool_stats = claude_history_store::query::tool_frequency(conn)?;
+
+            let model_stats = claude_history_store::query::model_breakdown(conn)?;
+
+            Ok((token_stats, tool_stats, model_stats))
+        })
+        .await;
+
+    let (token_stats, tool_stats, model_stats) = match stats_result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Stats query failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct StatsJson<'a> {
+            token_usage: &'a [claude_history_store::query::TokenStats],
+            tool_frequency: &'a [claude_history_store::query::ToolStats],
+            model_breakdown: &'a [claude_history_store::query::ModelStats],
+        }
+        let combined = StatsJson {
+            token_usage: &token_stats,
+            tool_frequency: &tool_stats,
+            model_breakdown: &model_stats,
+        };
+        if output::print_json(&combined).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_stats(&token_stats, &tool_stats, &model_stats);
+    }
+
+    ExitCode::SUCCESS
 }
