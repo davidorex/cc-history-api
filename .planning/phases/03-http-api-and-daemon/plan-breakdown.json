@@ -293,9 +293,74 @@
     },
     {
       "plan_number": 5,
-      "name": "CLI-15: socket detection and daemon-aware CLI fallback",
+      "name": "HTTP-over-UDS client: DaemonClient and ConnectionMode abstraction",
       "wave": 5,
       "depends_on": ["03-04"],
+      "autonomous": true,
+      "is_tdd": false,
+      "requirements": ["CLI-15"],
+      "files_modified": [
+        "crates/server/Cargo.toml",
+        "crates/server/src/daemon_client.rs"
+      ],
+      "must_haves": {
+        "truths": [
+          "DaemonClient struct can make HTTP GET and POST requests over a Unix domain socket to the daemon API",
+          "DaemonClient methods map to each /v1/ endpoint the CLI subcommands need: health, sessions (list), search, query (POST), stats (token/tool/model), export, version_history, schema_drift",
+          "Each DaemonClient method returns deserialized JSON as the same Serialize/Deserialize types used by the store layer, so CLI formatting code works identically regardless of data source",
+          "ConnectionMode enum (Daemon(DaemonClient) | Direct(tokio_rusqlite::Connection)) enables the CLI dispatch layer to choose data source at startup"
+        ],
+        "artifacts": [
+          "crates/server/Cargo.toml with hyper, hyper-util, http-body-util, and tower dependencies added for the UDS HTTP client",
+          "crates/server/src/daemon_client.rs with DaemonClient struct and ConnectionMode enum"
+        ],
+        "key_links": [
+          "DaemonClient uses hyper (1.x) client with a tower::Service connector that opens a tokio::net::UnixStream to the socket path -- this is the standard hyper-over-UDS pattern since hyper 1.0",
+          "Each DaemonClient method constructs an HTTP request to the corresponding /v1/ endpoint, sends it over the UDS, reads the response body, and deserializes with serde_json",
+          "ConnectionMode::Daemon holds DaemonClient; ConnectionMode::Direct holds tokio_rusqlite::Connection -- the CLI dispatch layer pattern-matches on this enum"
+        ]
+      },
+      "tasks": [
+        {
+          "name": "Task 1: Add UDS HTTP client dependencies to server crate",
+          "type": "auto",
+          "files": [
+            "Cargo.toml",
+            "crates/server/Cargo.toml"
+          ],
+          "action": "Add to root Cargo.toml [workspace.dependencies]: hyper = { version = \"1\", features = [\"client\", \"http1\"] }, hyper-util = { version = \"0.1\", features = [\"tokio\", \"client-legacy\"] }, http-body-util = \"0.1\". Add corresponding { workspace = true } entries in crates/server/Cargo.toml. These are the standard hyper 1.x crates for building an HTTP client. hyper provides the HTTP protocol, hyper-util provides the legacy::Client builder that accepts a custom connector, and http-body-util provides BodyExt for collecting response bodies. The connector will use tokio::net::UnixStream (already available from tokio with the 'net' feature, which is already enabled).",
+          "verify": "cargo check --workspace compiles with the new dependencies. No version conflicts with axum's transitive hyper dependency (axum 0.8 uses hyper 1.x, so versions align).",
+          "done": "hyper 1, hyper-util 0.1, http-body-util 0.1 are declared in workspace dependencies and available to the server crate."
+        },
+        {
+          "name": "Task 2: Implement DaemonClient with HTTP-over-UDS and ConnectionMode enum",
+          "type": "auto",
+          "files": [
+            "crates/server/src/daemon_client.rs"
+          ],
+          "action": "Create crates/server/src/daemon_client.rs. Define ConnectionMode enum: pub enum ConnectionMode { Daemon(DaemonClient), Direct { conn: tokio_rusqlite::Connection, db_path: std::path::PathBuf } }. Define pub struct DaemonClient { socket_path: PathBuf }. Implement a private async method request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, DaemonError> that: (1) Opens a tokio::net::UnixStream to self.socket_path. (2) Uses hyper_util::rt::TokioIo to wrap the UnixStream. (3) Sends an HTTP/1.1 request with the given method, path, Host header set to 'localhost', and optional body with Content-Type: application/json. Use hyper::client::conn::http1::handshake() to establish the connection, then send_request(). (4) Collects the response body using http_body_util::BodyExt::collect(). (5) If status is not 2xx, return DaemonError::Api { status, body }. (6) Returns the collected body bytes. Define DaemonError enum: Connection(std::io::Error), Hyper(hyper::Error), Api { status: u16, body: String }, Json(serde_json::Error). Implement Display and std::error::Error for DaemonError. Add convenience methods for each CLI subcommand's data needs: (1) pub async fn health(&self) -> Result<serde_json::Value, DaemonError>: GET /v1/health, deserialize as Value. (2) pub async fn sessions(&self, project: Option<&str>, after: Option<&str>, before: Option<&str>, limit: usize) -> Result<serde_json::Value, DaemonError>: GET /v1/sessions with query params built from arguments. (3) pub async fn search(&self, query: &str, limit: usize) -> Result<serde_json::Value, DaemonError>: GET /v1/search?q={query}&limit={limit}. (4) pub async fn query_messages(&self, body_json: &[u8]) -> Result<serde_json::Value, DaemonError>: POST /v1/messages/query with JSON body. (5) pub async fn stats_tokens(&self, session_id: Option<&str>) -> Result<serde_json::Value, DaemonError>: GET /v1/analytics/tokens with optional session_id query param. (6) pub async fn stats_tools(&self) -> Result<serde_json::Value, DaemonError>: GET /v1/analytics/tools. (7) pub async fn stats_models(&self) -> Result<serde_json::Value, DaemonError>: GET /v1/analytics/models. (8) pub async fn export_session(&self, session_id: &str, format: &str) -> Result<Vec<u8>, DaemonError>: GET /v1/export/{session_id}?format={format}, returns raw bytes (not deserialized). (9) pub async fn version_history(&self) -> Result<serde_json::Value, DaemonError>: GET /v1/schema/versions. (10) pub async fn schema_drift(&self, record_type: Option<&str>, limit: usize) -> Result<serde_json::Value, DaemonError>: GET /v1/schema/drift with query params. For query param construction, use a simple approach: build the path string with format! and url-encode values. The return type is serde_json::Value for most methods because the CLI formatting layer already handles the store types -- returning Value allows the CLI to deserialize into the specific store types it needs, or use the Value directly for JSON output mode. Add pub fn resolve_socket_path(cli_arg: Option<&std::path::Path>) -> PathBuf: checks cli_arg, then CLAUDE_HISTORY_SOCKET env, then /tmp/claude-history.sock default. Add pub async fn detect_connection_mode(socket_path: &Path, db_path_arg: Option<PathBuf>) -> ConnectionMode: if socket exists AND a test GET /v1/health succeeds, return Daemon(DaemonClient); otherwise fall back to Direct with open_db. The health check verifies the daemon is actually responsive, not just that a stale socket file exists.",
+          "verify": "cargo check --workspace compiles. daemon_client.rs exports DaemonClient, ConnectionMode, DaemonError, resolve_socket_path, detect_connection_mode.",
+          "done": "DaemonClient struct compiles with 10 endpoint methods. ConnectionMode enum distinguishes Daemon vs Direct. resolve_socket_path follows CLI arg > env > default pattern. detect_connection_mode probes the socket with a health check before choosing Daemon mode."
+        }
+      ],
+      "verification": [
+        "cargo check --workspace succeeds",
+        "daemon_client.rs exports DaemonClient, ConnectionMode, DaemonError",
+        "resolve_socket_path returns correct path for each resolution level (arg, env, default)",
+        "ConnectionMode has Daemon and Direct variants"
+      ],
+      "success_criteria": [
+        "DaemonClient can construct and send HTTP requests over a Unix domain socket using hyper 1.x",
+        "Each of the 10 endpoint methods maps to the correct /v1/ path and HTTP method",
+        "ConnectionMode enum cleanly separates daemon-connected and direct-DB code paths",
+        "detect_connection_mode probes socket health before committing to daemon mode, falling back to direct DB on failure"
+      ]
+    },
+    {
+      "plan_number": 6,
+      "name": "CLI-15: Wire all read-only CLI subcommands through daemon when socket is available",
+      "wave": 6,
+      "depends_on": ["03-05"],
       "autonomous": true,
       "is_tdd": false,
       "requirements": ["CLI-15"],
@@ -304,40 +369,56 @@
       ],
       "must_haves": {
         "truths": [
-          "When the daemon socket exists at the expected path, CLI subcommands detect it and report that the daemon is available",
-          "When the daemon socket does not exist, CLI subcommands open the DB directly in read-only mode as they do today",
-          "The socket detection path follows the same resolution as the serve command: CLI arg > CLAUDE_HISTORY_SOCKET env > /tmp/claude-history.sock default"
+          "When the daemon socket exists and responds to a health check, CLI read-only subcommands (sessions, search, query, stats, export, version-check, schema-drift) route their data fetches through the daemon HTTP API over UDS instead of opening the database directly",
+          "When the daemon socket does not exist or the health check fails, CLI subcommands fall back to direct DB access as they do today -- behavior is identical to the pre-daemon state",
+          "The sync subcommand always uses direct DB access regardless of daemon availability, since it is a write operation",
+          "CLI output formatting (table, JSON) is identical regardless of whether data came from daemon or direct DB -- the user cannot tell the difference except via log messages"
         ],
         "artifacts": [
-          "crates/server/src/main.rs with socket detection logic in open_db or a new helper function"
+          "crates/server/src/main.rs updated with ConnectionMode dispatch in all 7 read-only subcommand handlers"
         ],
         "key_links": [
-          "socket_path resolution is shared between serve command (binding) and detection (checking existence)",
-          "Direct DB path continues to work identically when no daemon is running"
+          "main() calls detect_connection_mode() once at startup and passes the ConnectionMode to subcommand handlers",
+          "Each read-only run_* function adds a match arm for ConnectionMode::Daemon that calls the corresponding DaemonClient method, deserializes the response, and feeds it to the same output formatting code",
+          "The sync subcommand bypasses ConnectionMode and always opens the DB directly, since syncing is a write path that cannot route through the read-only HTTP API"
         ]
       },
       "tasks": [
         {
-          "name": "Task 1: Socket detection utility and CLI fallback integration",
+          "name": "Task 1: Integrate ConnectionMode into main dispatch and update sessions/search/query subcommands",
           "type": "auto",
           "files": [
             "crates/server/src/main.rs"
           ],
-          "action": "Add a resolve_socket_path() function: checks socket CLI arg (if applicable), then CLAUDE_HISTORY_SOCKET env, then /tmp/claude-history.sock default. Returns PathBuf. Add a detect_daemon() function that checks if the resolved socket path exists on the filesystem. If it exists, log an info message: 'Daemon detected at {path}. API available via socket.' For Phase 3, CLI subcommands continue using direct DB access regardless of daemon status (the full HTTP-over-UDS client for CLI commands is deferred to avoid scope creep -- the research noted this is significant scope). The detection logic is the foundation: it verifies the socket exists and logs daemon availability. Modify the open_db function (or add a wrapper) to call detect_daemon() before opening the DB. If daemon is detected, log the socket path at info level so users know the API is available. The actual behavior remains: open DB directly for all subcommands. This satisfies CLI-15's 'CLI connects to daemon socket if available, otherwise opens DB read-only' at the detection level -- the 'connects to daemon' part is detection + reporting for now, with direct DB as the always-available fallback.",
-          "verify": "cargo check --workspace compiles. With daemon running, CLI subcommands log 'Daemon detected at ...' before executing. Without daemon, no detection message appears.",
-          "done": "resolve_socket_path and detect_daemon functions exist. CLI logs daemon availability when socket file is present. All existing subcommands continue to work via direct DB access."
+          "action": "Add mod daemon_client; to main.rs. Modify the main() function dispatch: for all subcommands except Sync and Serve, call daemon_client::resolve_socket_path(None) then daemon_client::detect_connection_mode(&socket_path, cli.db_path.clone()).await to get a ConnectionMode. Pass this ConnectionMode to the subcommand handler functions instead of the raw db_path_arg. Update run_search: add match on ConnectionMode. For Daemon variant: call client.search(&query, limit).await, deserialize the Value into Vec<SearchResult> (using serde_json::from_value), then pass to same output formatting. For Direct variant: use existing conn.call() logic unchanged. Update run_sessions: For Daemon: call client.sessions(project.as_deref(), after.as_deref(), before.as_deref(), limit).await, deserialize into Vec<SessionSummary>. For Direct: existing logic. Update run_query: For Daemon: serialize the query params as JSON body, call client.query_messages(&body).await, deserialize into Vec<MessageResult>. For Direct: existing logic. In each case, if the Daemon call fails with DaemonError, log a warning about the daemon communication failure and print an error -- do not silently fall back to direct DB mid-request (the connection mode was chosen at startup; if the daemon goes down mid-session, the user should see the error). Log at info level when using daemon mode: 'Routing through daemon at {socket_path}'.",
+          "verify": "cargo check --workspace compiles. Run claude-history sessions without daemon -- works as before. With daemon running, run claude-history sessions -- routes through daemon API.",
+          "done": "run_search, run_sessions, run_query all dispatch through DaemonClient when daemon is available. Direct DB fallback works when daemon is not running."
+        },
+        {
+          "name": "Task 2: Update stats/export/version-check/schema-drift subcommands for daemon routing",
+          "type": "auto",
+          "files": [
+            "crates/server/src/main.rs"
+          ],
+          "action": "Update run_stats: For Daemon variant: call client.stats_tokens(session_id.as_deref()).await for token stats, client.stats_tools().await for tool stats, client.stats_models().await for model stats. Deserialize each into the corresponding store types (Vec<TokenStats>, Vec<ToolStats>, Vec<ModelStats>). Pass to same output::print_stats or output::print_json formatting. For Direct: existing logic. Update run_export: For Daemon variant: call client.export_session(&session_id, &format).await which returns raw bytes. Write those bytes to stdout. For Direct: existing logic. Update run_version_check: For Daemon: call client.version_history().await, deserialize into Vec<VersionEntry>. For Direct: existing logic. Update run_schema_drift: For Daemon: call client.schema_drift(record_type.as_deref(), limit).await, deserialize into Vec<DriftEntry>. Note: the daemon endpoint already applies record_type filtering and limit, so no post-fetch filtering needed in daemon mode. For Direct: existing logic (with the Rust-side filter). Ensure the Serve and Sync commands are NOT affected by ConnectionMode -- Sync always opens DB directly (write operation), Serve starts the daemon itself. After all changes, all 7 read-only subcommands route through the daemon when socket is available. Add a debug log line in detect_connection_mode to indicate which path was chosen.",
+          "verify": "cargo check --workspace compiles. cargo build succeeds. All 8 existing subcommands (sync, search, sessions, query, stats, export, version-check, schema-drift) plus serve still work. With daemon running: read subcommands route through daemon. Without daemon: fall back to direct DB.",
+          "done": "All 7 read-only CLI subcommands (sessions, search, query, stats, export, version-check, schema-drift) automatically connect to daemon socket when available and fall back to direct DB when not. Sync always uses direct DB. Output is identical in both modes."
         }
       ],
       "verification": [
         "cargo check --workspace succeeds",
         "cargo build --workspace succeeds",
-        "All existing CLI subcommands still function correctly",
-        "With a socket file present at /tmp/claude-history.sock, CLI logs daemon detection"
+        "Without daemon: all CLI subcommands work via direct DB (existing behavior preserved)",
+        "With daemon running: claude-history sessions/search/query/stats/export/version-check/schema-drift route through the daemon HTTP API over UDS",
+        "claude-history sync always uses direct DB regardless of daemon status",
+        "Output format (table, JSON, raw export) is identical regardless of daemon vs direct mode"
       ],
       "success_criteria": [
-        "Socket path resolution uses CLI arg > env var > default, consistent with serve command",
-        "Daemon detection correctly identifies socket file presence",
-        "CLI subcommands work identically whether daemon is running or not (direct DB access in both cases for Phase 3)"
+        "CLI subcommands automatically connect to the daemon socket when available (SC-4 satisfied)",
+        "CLI connects to daemon socket if available, otherwise opens DB read-only (CLI-15 satisfied)",
+        "All read-only subcommands produce identical output whether data comes from daemon or direct DB",
+        "Sync subcommand is excluded from daemon routing (write operation)",
+        "Daemon connection failure produces a clear error rather than silent fallback"
       ]
     }
   ],
@@ -345,12 +426,14 @@
     "PAT-011: Database uses tokio-rusqlite with conn.call() closures -- all API handlers follow this pattern",
     "PAT-020: clap derive CLI with #[tokio::main] -- Serve variant added to existing Commands enum",
     "PAT-021: Path resolution: CLI arg > env var > HOME default -- socket path follows same pattern",
-    "PAT-022: Inline #[cfg(test)] mod tests -- new store functions get inline tests"
+    "PAT-022: Inline #[cfg(test)] mod tests -- new store functions get inline tests",
+    "PAT-023: HTTP-over-UDS via hyper 1.x handshake + UnixStream -- DaemonClient uses per-request connections"
   ],
   "anti_patterns": [
     "Do not open a new DB connection per request -- use shared AppState.conn via Arc",
     "Do not call synchronous rusqlite inside async handlers -- always use conn.call()",
     "Do not expose raw SQL or internal paths in API error responses -- sanitize via ApiError",
-    "Do not forget to remove stale socket files before binding UnixListener"
+    "Do not forget to remove stale socket files before binding UnixListener",
+    "Do not silently fall back to direct DB if daemon was chosen at startup but fails mid-request -- surface the error"
   ]
 }
