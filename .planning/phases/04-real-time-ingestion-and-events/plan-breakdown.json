@@ -18,13 +18,13 @@
         "crates/server/src/events.rs",
         "crates/server/src/state.rs",
         "crates/server/src/api/mod.rs",
-        "crates/server/src/lib.rs"
+        "crates/server/src/main.rs"
       ],
       "tasks": [
         {
           "name": "Add workspace dependencies and create SseEvent types + SSE handler",
           "type": "auto",
-          "files": ["Cargo.toml", "crates/server/Cargo.toml", "crates/server/src/events.rs", "crates/server/src/lib.rs"],
+          "files": ["Cargo.toml", "crates/server/Cargo.toml", "crates/server/src/events.rs", "crates/server/src/main.rs"],
           "estimated_context": "20%"
         },
         {
@@ -47,15 +47,14 @@
       "files_modified": [
         "crates/server/Cargo.toml",
         "crates/server/src/watcher.rs",
-        "crates/server/src/lib.rs",
-        "crates/server/src/serve.rs",
-        "crates/server/src/main.rs"
+        "crates/server/src/main.rs",
+        "crates/server/src/serve.rs"
       ],
       "tasks": [
         {
           "name": "Create watcher module with FileDebouncer, spawn_watcher, and watcher_loop",
           "type": "auto",
-          "files": ["crates/server/Cargo.toml", "crates/server/src/watcher.rs", "crates/server/src/lib.rs"],
+          "files": ["crates/server/Cargo.toml", "crates/server/src/watcher.rs", "crates/server/src/main.rs"],
           "estimated_context": "30%"
         },
         {
@@ -77,5 +76,56 @@
     "SSE-03": ["04-01", "04-02"],
     "SSE-04": ["04-01", "04-02"],
     "SSE-05": ["04-01", "04-02"]
-  }
+  },
+  "patterns": [
+    {
+      "id": "PAT-001",
+      "name": "Three-crate Cargo workspace",
+      "description": "Dependencies flow core->store->server. Workspace deps at root, consumed via { workspace = true }.",
+      "affected_files": ["Cargo.toml", "crates/server/Cargo.toml"]
+    },
+    {
+      "id": "PAT-002",
+      "name": "Server crate is binary-only",
+      "description": "Server crate produces binary via [[bin]] section. No lib.rs — module declarations in main.rs.",
+      "affected_files": ["crates/server/src/main.rs"]
+    },
+    {
+      "id": "PAT-011",
+      "name": "WAL mode + tokio-rusqlite async wrapper",
+      "description": "Database uses WAL mode with 5s busy_timeout. tokio-rusqlite Connection is Arc-based and Clone. conn.call() for sync rusqlite ops.",
+      "affected_files": ["crates/server/src/watcher.rs", "crates/server/src/state.rs"]
+    },
+    {
+      "id": "PAT-016",
+      "name": "Incremental byte-offset sync",
+      "description": "sync_file reads from stored byte offset, returns records_synced count. Per-batch transactions with atomic sync_metadata updates.",
+      "affected_files": ["crates/server/src/watcher.rs"]
+    },
+    {
+      "id": "PAT-017",
+      "name": "extract_session_id from file paths",
+      "description": "Handles main session files (UUID filename stem) and subagent files (parent of subagents dir). Path component traversal.",
+      "affected_files": ["crates/server/src/watcher.rs"]
+    },
+    {
+      "id": "PAT-020",
+      "name": "clap derive CLI with #[tokio::main]",
+      "description": "Subcommand enum with clap derive. tracing-subscriber for logging. ExitCode return type.",
+      "affected_files": ["crates/server/src/main.rs"]
+    },
+    {
+      "id": "PAT-021",
+      "name": "Path resolution: CLI arg > env > HOME default",
+      "description": "resolve_db_path and resolve_projects_dir follow this pattern consistently.",
+      "affected_files": ["crates/server/src/main.rs"]
+    },
+    {
+      "id": "PAT-014",
+      "name": "Session upsert INSERT OR IGNORE first-seen",
+      "description": "First record creates session row, subsequent records are no-ops. Version field reflects first-seen value.",
+      "affected_files": ["crates/server/src/watcher.rs"]
+    }
+  ],
+  "anti_patterns": []
 }
