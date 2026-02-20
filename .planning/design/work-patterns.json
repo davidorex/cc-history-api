@@ -1,0 +1,276 @@
+{
+  "audit_context": "Full codebase pattern audit for cc-history-api — Phase 1 complete, constraining patterns for all future phases",
+  "audit_date": "2026-02-20",
+  "source_registry": ".planning/patterns.jsonl",
+  "total_patterns": 32,
+  "applicable_patterns": [
+    {
+      "id": "PAT-001",
+      "area": "rust-workspace",
+      "pattern": "Three-crate Cargo workspace: core (types+parser), store (SQLite+decomposition+sync), server (binary+CLI). Dependencies flow core->store->server. Workspace dependencies declared at root level.",
+      "exemplar": "Cargo.toml",
+      "exemplar_lines": "1-17",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-002",
+      "area": "rust-workspace",
+      "pattern": "Crate naming: claude-history-core, claude-history-store, claude-history (binary). Server crate produces binary via [[bin]] section.",
+      "exemplar": "crates/server/Cargo.toml",
+      "exemplar_lines": "1-8",
+      "applies_to_phases": ["Phase 2", "Phase 3"]
+    },
+    {
+      "id": "PAT-003",
+      "area": "rust-serde",
+      "pattern": "Top-level JSONL record enum uses serde(tag = 'type') for discriminated union. 7 variants matching JSON type field values.",
+      "exemplar": "crates/core/src/record.rs",
+      "exemplar_lines": "23-46",
+      "applies_to_phases": ["Phase 5"]
+    },
+    {
+      "id": "PAT-004",
+      "area": "rust-serde",
+      "pattern": "Overflow capture via #[serde(flatten)] HashMap<String, serde_json::Value> on outermost struct only. No overflow on RecordBase or enum variants.",
+      "exemplar": "crates/core/src/record.rs",
+      "exemplar_lines": "54-106",
+      "applies_to_phases": ["Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-005",
+      "area": "rust-serde",
+      "pattern": "#[serde(rename_all = 'camelCase')] on structs. Explicit serde(rename) for fields that break the camelCase transform.",
+      "exemplar": "crates/core/src/record.rs",
+      "exemplar_lines": "55-93",
+      "applies_to_phases": ["Phase 5"]
+    },
+    {
+      "id": "PAT-006",
+      "area": "rust-serde",
+      "pattern": "Optional fields use #[serde(default)]. Polymorphic/opaque fields use serde_json::Value rather than typed enums when variant count is high.",
+      "exemplar": "crates/core/src/record.rs",
+      "exemplar_lines": "63-106",
+      "applies_to_phases": ["Phase 5"]
+    },
+    {
+      "id": "PAT-007",
+      "area": "rust-serde",
+      "pattern": "ContentBlock enum uses serde(tag = 'type') with inline fields. No overflow on enum variants. Tool inputs/results as serde_json::Value.",
+      "exemplar": "crates/core/src/message.rs",
+      "exemplar_lines": "37-71",
+      "applies_to_phases": ["Phase 5"]
+    },
+    {
+      "id": "PAT-009",
+      "area": "sqlite-schema",
+      "pattern": "Normalized table design with 13 tables. New tables for future phases must follow the same DDL conventions: TEXT for strings/timestamps, INTEGER for booleans (0/1), TEXT for JSON blobs, REFERENCES for foreign keys.",
+      "exemplar": "crates/store/migrations/001_initial.sql",
+      "exemplar_lines": "1-162",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 5"]
+    },
+    {
+      "id": "PAT-010",
+      "area": "sqlite-schema",
+      "pattern": "New DDL goes in numbered migration files (002_*.sql, 003_*.sql). Added to MIGRATIONS const array. run_migrations applies in order, idempotent.",
+      "exemplar": "crates/store/src/schema.rs",
+      "exemplar_lines": "9-59",
+      "applies_to_phases": ["Phase 2", "Phase 5"]
+    },
+    {
+      "id": "PAT-011",
+      "area": "sqlite-schema",
+      "pattern": "Database init: WAL mode, 5s busy_timeout, synchronous=NORMAL, foreign_keys=ON. tokio-rusqlite conn.call() for synchronous SQLite operations.",
+      "exemplar": "crates/store/src/db.rs",
+      "exemplar_lines": "39-88",
+      "applies_to_phases": ["Phase 3", "Phase 4"]
+    },
+    {
+      "id": "PAT-012",
+      "area": "decomposition",
+      "pattern": "INSERT OR IGNORE for idempotency. Duplicate decompositions produce 0 rows, not errors. All decomposition on &Transaction reference.",
+      "exemplar": "crates/store/src/decompose.rs",
+      "exemplar_lines": "29-70",
+      "applies_to_phases": ["Phase 5"]
+    },
+    {
+      "id": "PAT-013",
+      "area": "decomposition",
+      "pattern": "Per-type decompose_* functions: (1) upsert session, (2) insert event, (3) decompose content, (4) upsert agent, (5) log overflow.",
+      "exemplar": "crates/store/src/decompose.rs",
+      "exemplar_lines": "321-350",
+      "applies_to_phases": ["Phase 5"]
+    },
+    {
+      "id": "PAT-015",
+      "area": "drift",
+      "pattern": "Qualified record_type names for drift logging. INSERT OR IGNORE deduplication. Sample value truncation at 500 chars.",
+      "exemplar": "crates/store/src/drift.rs",
+      "exemplar_lines": "22-86",
+      "applies_to_phases": ["Phase 6"]
+    },
+    {
+      "id": "PAT-016",
+      "area": "sync",
+      "pattern": "Incremental sync via byte-offset in sync_metadata. BATCH_SIZE=1000 chunk processing. Per-batch transaction commits with atomic metadata updates.",
+      "exemplar": "crates/store/src/sync.rs",
+      "exemplar_lines": "113-299",
+      "applies_to_phases": ["Phase 4"]
+    },
+    {
+      "id": "PAT-018",
+      "area": "parser",
+      "pattern": "Line-by-line BufReader parsing for byte-offset tracking. Malformed lines -> ParseWarning, never halt. ParseError for file-level I/O only.",
+      "exemplar": "crates/core/src/parser.rs",
+      "exemplar_lines": "67-170",
+      "applies_to_phases": ["Phase 4"]
+    },
+    {
+      "id": "PAT-019",
+      "area": "error-handling",
+      "pattern": "Per-crate thiserror error types. SchemaError maps via ToSqlConversionFailure for tokio-rusqlite conn.call() compatibility.",
+      "exemplar": "crates/store/src/db.rs",
+      "exemplar_lines": "12-25",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-020",
+      "area": "cli",
+      "pattern": "clap derive CLI with subcommand enum. #[tokio::main] async. tracing to stderr, output to stdout. ExitCode return.",
+      "exemplar": "crates/server/src/main.rs",
+      "exemplar_lines": "19-103",
+      "applies_to_phases": ["Phase 2", "Phase 3"]
+    },
+    {
+      "id": "PAT-021",
+      "area": "cli",
+      "pattern": "Path resolution priority: CLI arg > env var > $HOME default.",
+      "exemplar": "crates/server/src/main.rs",
+      "exemplar_lines": "43-79",
+      "applies_to_phases": ["Phase 2", "Phase 3"]
+    },
+    {
+      "id": "PAT-022",
+      "area": "testing",
+      "pattern": "Inline #[cfg(test)] mod tests. Descriptive /// comments. Helper functions per module. Store tests use in-memory SQLite.",
+      "exemplar": "crates/store/src/decompose.rs",
+      "exemplar_lines": "604-644",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-023",
+      "area": "testing",
+      "pattern": "Async tests via #[tokio::test]. tempfile for temp dirs. Exact row count + field value verification. Idempotency explicitly tested.",
+      "exemplar": "crates/store/src/sync.rs",
+      "exemplar_lines": "387-707",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-024",
+      "area": "doc-comments",
+      "pattern": "Module-level //! doc comments. Struct/function doc comments explain rationale. Requirement IDs cited. Empirical percentages where known.",
+      "exemplar": "crates/core/src/parser.rs",
+      "exemplar_lines": "1-14",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-025",
+      "area": "planning",
+      "pattern": "Planning artifacts: PROJECT.md, REQUIREMENTS.md, ROADMAP.md, STATE.md, config.json in .planning/",
+      "exemplar": ".planning/ROADMAP.md",
+      "exemplar_lines": "1-133",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-026",
+      "area": "planning",
+      "pattern": "Phase directories with RESEARCH, PLAN, execution-results, SUMMARY, VERIFICATION files. PLAN.md YAML frontmatter.",
+      "exemplar": ".planning/phases/01-core-types-and-ingestion-pipeline/01-01-PLAN.md",
+      "exemplar_lines": "1-68",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-028",
+      "area": "rust-workspace",
+      "pattern": "Dev-dependencies per crate, not at workspace level. tempfile for tests, tokio for async tests.",
+      "exemplar": "crates/store/Cargo.toml",
+      "exemplar_lines": "14-16",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-029",
+      "area": "rust-workspace",
+      "pattern": "Flat pub mod list in lib.rs. No re-exports or facades. Consumers import from specific module paths.",
+      "exemplar": "crates/core/src/lib.rs",
+      "exemplar_lines": "1-15",
+      "applies_to_phases": ["Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6"]
+    },
+    {
+      "id": "PAT-030",
+      "area": "decomposition",
+      "pattern": "ToolUse blocks produce dual inserts: message_content + tool_executions. Both INSERT OR IGNORE.",
+      "exemplar": "crates/store/src/decompose.rs",
+      "exemplar_lines": "199-225",
+      "applies_to_phases": ["Phase 5"]
+    },
+    {
+      "id": "PAT-032",
+      "area": "sqlite-schema",
+      "pattern": "Index naming: idx_{table}_{column}. Created on high-cardinality lookup columns.",
+      "exemplar": "crates/store/migrations/001_initial.sql",
+      "exemplar_lines": "152-162",
+      "applies_to_phases": ["Phase 2", "Phase 5"]
+    }
+  ],
+  "anti_patterns": [
+    {
+      "violation": "Adding serde(flatten) overflow HashMap to RecordBase or any shared inner struct",
+      "correct": "Overflow HashMap goes on outermost containing struct only (e.g., UserRecord, AssistantRecord) — one overflow per struct hierarchy path",
+      "reason": "Multiple serde(flatten) on nested structs causes ambiguity where serde cannot determine which HashMap should capture unknown fields. Documented in STATE.md decision [01-02]."
+    },
+    {
+      "violation": "Halting JSONL parsing on a malformed line",
+      "correct": "Malformed lines produce ParseWarning entries; parsing continues to the next line. ParseError is for file-level I/O failures only.",
+      "reason": "Claude Code may be actively writing to a file, producing partial final lines. A single corrupted line must not prevent ingesting thousands of valid records. Requirement CORE-07."
+    },
+    {
+      "violation": "Using serde StreamDeserializer instead of line-by-line BufReader parsing",
+      "correct": "Parse line-by-line with BufReader::lines() to enable byte-offset tracking for incremental sync",
+      "reason": "StreamDeserializer cannot provide byte offsets for individual records, which are required for sync_metadata tracking. Requirement SYNC-01."
+    },
+    {
+      "violation": "Creating separate test files instead of inline #[cfg(test)] mod tests",
+      "correct": "Tests live as #[cfg(test)] mod tests within the same source file they test",
+      "reason": "Established project convention. All 12+ test modules in the codebase follow this pattern. Keeps test helpers close to the code they test."
+    },
+    {
+      "violation": "Using UPDATE for session rows when session already exists",
+      "correct": "INSERT OR IGNORE — first record seen creates the row, duplicates are no-ops",
+      "reason": "Session metadata varies across records within the same session. First-seen value is most useful for provenance. UPDATE would overwrite first-seen data with later data."
+    },
+    {
+      "violation": "Adding new tables directly to 001_initial.sql or modifying existing migration files",
+      "correct": "New DDL goes in new numbered migration files (002_*.sql, etc.) added to the MIGRATIONS array in schema.rs",
+      "reason": "Existing databases already have 001_initial.sql applied. Modifying it would not affect existing databases. Migrations are immutable once applied."
+    },
+    {
+      "violation": "Placing new dependencies at workspace level when only one crate needs them",
+      "correct": "Add dependencies to the specific crate's Cargo.toml. Only dependencies shared by multiple crates belong in workspace.dependencies",
+      "reason": "Keeps dependency scope minimal and compilation times down. Phase 2 additions (e.g., axum) should go in server crate only until needed elsewhere."
+    },
+    {
+      "violation": "Using raw rusqlite Connection in async code paths",
+      "correct": "Use tokio_rusqlite::Connection with conn.call(|conn| { ... }) closures",
+      "reason": "rusqlite Connection is !Send. tokio-rusqlite wraps it in a dedicated thread. All async code must use the conn.call() bridge pattern."
+    },
+    {
+      "violation": "Logging structured output to stdout",
+      "correct": "tracing logs go to stderr. Human-readable or machine-parseable output goes to stdout.",
+      "reason": "Allows piping stdout output through jq or other tools without tracing noise. Established in main.rs with .with_writer(std::io::stderr)."
+    },
+    {
+      "violation": "Using unwrap() or expect() in library crate code (core, store)",
+      "correct": "Return Result with appropriate error types. unwrap/expect only in test code and CLI binary.",
+      "reason": "Library crates must propagate errors to callers. Only the binary entry point and test assertions should panic."
+    }
+  ]
+}
