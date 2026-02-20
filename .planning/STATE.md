@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 3 - HTTP API and Daemon
+**Current focus:** Phase 3 - HTTP API and Daemon -- COMPLETE
 
 ## Current Position
 
-Phase: 3 of 6 (HTTP API and Daemon) — IN PROGRESS
-Plan: 5 of 6 complete in current phase — DaemonClient and ConnectionMode done
-Status: Plan 03-05 complete. DaemonClient sends HTTP/1.1 over UDS via hyper handshake with 10 endpoint methods. ConnectionMode enum (Daemon/Direct) ready for CLI dispatch. detect_connection_mode probes socket health before choosing mode. Plan 03-06 next.
-Last activity: 2026-02-20 -- Plan 03-05 executed (daemon_client.rs + Deserialize derives on store types)
+Phase: 3 of 6 (HTTP API and Daemon) -- COMPLETE
+Plan: 6 of 6 complete in current phase -- all plans executed
+Status: Phase 3 complete. All daemon infrastructure in place: serve command with dual TCP+UDS listeners, 10 HTTP API endpoints, DaemonClient with HTTP-over-UDS transport, ConnectionMode dispatch wiring all 7 read-only CLI subcommands through daemon when available. Ready for Phase 4.
+Last activity: 2026-02-20 -- Plan 03-06 executed (CLI-15 daemon wiring in main.rs)
 
-Progress: [██████░░░░] ~63% (12 of ~19 total plans)
+Progress: [███████░░░] ~68% (13 of ~19 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12
-- Average duration: ~7 min
-- Total execution time: ~1.3 hours
+- Total plans completed: 13
+- Average duration: ~6.5 min
+- Total execution time: ~1.4 hours
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [██████░░░░] ~63% (12 of ~19 total plans)
 |-------|-------|-------|----------|
 | 01 | 4/4 | 28 min | 7 min |
 | 02 | 3/3 | 22 min | 7.3 min |
-| 03 | 5/6 | ~26 min | ~5.2 min |
+| 03 | 6/6 | ~30 min | ~5 min |
 
 **Recent Trend:**
-- Last 5 plans: 5, 6, 5, 5, 5 min
-- Trend: 03-05 DaemonClient implemented with one deviation (adding Deserialize to store types) — compile-clean on first attempt after the Deserialize fix
+- Last 5 plans: 6, 5, 5, 5, 4 min
+- Trend: 03-06 CLI wiring executed cleanly with no deviations; all 7 handlers updated in single dispatch refactor
 
 *Updated after each plan completion*
 
@@ -78,6 +78,9 @@ Recent decisions affecting current work:
 - [03-05]: Added serde::Deserialize to all store query result structs and HealthResponse — DaemonClient needs to deserialize daemon JSON responses into the same types the store layer produces
 - [03-05]: export_session() returns raw Vec<u8> instead of typed JSON — export responses may be markdown or CSV depending on format parameter
 - [03-05]: Minimal custom urlencoded() function instead of percent-encoding crate — query parameter values are simple strings, full crate is excessive
+- [03-06]: All 7 read-only handlers updated in single commit due to shared dispatch refactor — cannot compile with partial conversion
+- [03-06]: Daemon communication failures produce explicit errors rather than silent fallback to direct DB mid-request
+- [03-06]: Stats daemon routing uses group_by=session when session_id present, matching direct DB token_stats_by_model vs token_stats_by_session logic
 
 ### Pending Todos
 
@@ -90,5 +93,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Plan 03-05 complete, ready for 03-06
-Resume file: .planning/phases/03-http-api-and-daemon/03-06-PLAN.md (next plan)
+Stopped at: Phase 3 complete, ready for Phase 4
+Resume file: Phase 4 planning needed (next phase)

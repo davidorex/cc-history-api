@@ -1,0 +1,30 @@
+{
+  "plan_path": ".planning/phases/03-http-api-and-daemon/03-06-PLAN.md",
+  "plan_name": "CLI-15: Wire all read-only CLI subcommands through daemon when socket is available",
+  "phase": "03-http-api-and-daemon",
+  "plan_prefix": "03-06",
+  "status": "complete",
+  "tasks": [
+    {
+      "name": "Task 1: Integrate ConnectionMode into main dispatch and update sessions/search/query subcommands",
+      "status": "complete",
+      "commit_hash": "3cac252",
+      "commit_type": "feat",
+      "notes": "Refactored main() dispatch to detect ConnectionMode once at startup. Updated all 7 read-only handlers (search, sessions, query, stats, export, version-check, schema-drift) to accept ConnectionMode with Daemon/Direct match arms. All 7 co-committed because dispatch refactor requires all handlers to accept ConnectionMode for compilation. Removed dead open_db() helper."
+    },
+    {
+      "name": "Task 2: Update stats/export/version-check/schema-drift subcommands for daemon routing",
+      "status": "complete",
+      "commit_hash": "8e7bf7a",
+      "commit_type": "feat",
+      "notes": "Added debug log to detect_connection_mode Direct DB path. Stats/export/version-check/schema-drift daemon routing was co-committed in Task 1 due to shared dispatch. This commit covers the remaining daemon_client.rs enhancement."
+    }
+  ],
+  "decisions": [
+    "All 7 handlers updated in single commit due to shared dispatch refactor — compilation requires simultaneous conversion",
+    "Daemon communication failures produce explicit errors rather than silent fallback to direct DB",
+    "Stats daemon routing uses group_by=session when session_id present to match direct DB behavior"
+  ],
+  "issues_logged": [],
+  "deviations": []
+}
