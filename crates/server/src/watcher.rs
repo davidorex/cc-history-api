@@ -2,9 +2,9 @@
 //!
 //! This module provides the real-time ingestion pipeline: notify-based filesystem
 //! watching with per-file debounce, an async processing loop that triggers
-//! `sync_file` for each changed .jsonl file, and emits all four SSE event types
-//! (record:added, session:started, schema:drift, version:changed) through the
-//! broadcast channel.
+//! `sync_file` for each changed .jsonl file, and emits all seven SSE event types
+//! (record:added, session:started, schema:drift, version:changed, file:written,
+//! file:edited, git:commit) through the broadcast channel.
 //!
 //! Architecture:
 //! - `spawn_watcher` creates a blocking std::thread with the notify watcher
@@ -12,10 +12,12 @@
 //!   blocks indefinitely and must not be dropped)
 //! - `watcher_loop` runs as a tokio task, receiving filesystem events through
 //!   an mpsc channel and processing them asynchronously
-//! - FTS5 index is rebuilt periodically (every 30 seconds) rather than per-file
-//!   to avoid excessive rebuild overhead during rapid ingestion
+//! - FTS5 indexes (message content and file operations) are rebuilt periodically
+//!   (every 30 seconds) rather than per-file to avoid excessive rebuild overhead
+//!   during rapid ingestion
 //!
-//! Requirement IDs: WATCH-01, WATCH-02, WATCH-03, SSE-02, SSE-03, SSE-04, SSE-05
+//! Requirement IDs: WATCH-01, WATCH-02, WATCH-03, SSE-02, SSE-03, SSE-04, SSE-05,
+//!                  SSE-06, SSE-07
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,6 +25,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+
+use tokio_rusqlite::rusqlite;
 
 use crate::events::SseEvent;
 
@@ -171,6 +175,154 @@ pub fn spawn_watcher(
     setup_rx
         .recv()
         .unwrap_or_else(|_| Err(notify::Error::generic("Watcher thread died during setup")))
+}
+
+/// Query the current maximum rowid from file_operations and git_operations.
+///
+/// Used as a "before sync" snapshot so that after sync_file completes, we can
+/// query for rows with id > this snapshot to find newly-created artifact rows
+/// and emit corresponding SSE events.
+///
+/// Returns (max_file_op_id, max_git_op_id). Returns 0 if the tables are empty.
+async fn snapshot_artifact_ids(conn: &tokio_rusqlite::Connection) -> (i64, i64) {
+    let result = conn
+        .call(|conn| -> Result<_, rusqlite::Error> {
+            let file_max: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(id), 0) FROM file_operations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let git_max: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(id), 0) FROM git_operations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            Ok((file_max, git_max))
+        })
+        .await;
+
+    result.unwrap_or((0, 0))
+}
+
+/// Emit SSE events for file operations and git operations created after the
+/// given ID snapshots.
+///
+/// Queries file_operations for write/edit rows with id > file_op_snapshot and
+/// git_operations for commit rows with id > git_op_snapshot, then sends the
+/// corresponding FileWritten, FileEdited, or GitCommit events through the
+/// broadcast channel.
+///
+/// Query failures are logged at debug level and do not prevent other events
+/// from being emitted.
+///
+/// Requirement IDs: SSE-06, SSE-07
+async fn emit_artifact_events(
+    conn: &tokio_rusqlite::Connection,
+    session_id: &str,
+    file_op_snapshot: i64,
+    git_op_snapshot: i64,
+    event_tx: &broadcast::Sender<SseEvent>,
+) {
+    // SSE-06: file:written and file:edited events
+    let sid = session_id.to_string();
+    let file_ops = conn
+        .call(move |conn| -> Result<_, rusqlite::Error> {
+            let mut stmt = conn.prepare(
+                "SELECT file_path, operation_type, message_uuid
+                 FROM file_operations
+                 WHERE session_id = ?1 AND id > ?2
+                   AND operation_type IN ('write', 'edit')",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![sid, file_op_snapshot], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await;
+
+    match file_ops {
+        Ok(ops) => {
+            for (file_path, op_type, message_uuid) in ops {
+                match op_type.as_str() {
+                    "write" => {
+                        let _ = event_tx.send(SseEvent::FileWritten {
+                            session_id: session_id.to_string(),
+                            file_path,
+                            message_uuid,
+                        });
+                    }
+                    "edit" => {
+                        let _ = event_tx.send(SseEvent::FileEdited {
+                            session_id: session_id.to_string(),
+                            file_path,
+                            message_uuid,
+                        });
+                    }
+                    _ => {} // Other operation types do not produce SSE events
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                session_id = session_id,
+                "Failed to query new file operations for SSE events"
+            );
+        }
+    }
+
+    // SSE-07: git:commit events
+    let sid = session_id.to_string();
+    let git_ops = conn
+        .call(move |conn| -> Result<_, rusqlite::Error> {
+            let mut stmt = conn.prepare(
+                "SELECT commit_message, branch, message_uuid
+                 FROM git_operations
+                 WHERE session_id = ?1 AND id > ?2
+                   AND operation_type = 'commit'",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![sid, git_op_snapshot], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await;
+
+    match git_ops {
+        Ok(ops) => {
+            for (commit_message, branch, message_uuid) in ops {
+                let _ = event_tx.send(SseEvent::GitCommit {
+                    session_id: session_id.to_string(),
+                    commit_message,
+                    branch,
+                    message_uuid,
+                });
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                session_id = session_id,
+                "Failed to query new git operations for SSE events"
+            );
+        }
+    }
 }
 
 /// Check whether a file has been previously synced (exists in sync_metadata).
@@ -371,6 +523,10 @@ pub async fn watcher_loop(
                             // Check if this is a new file BEFORE sync_file updates sync_metadata
                             let was_new_file = is_new_file(&conn, &path_str).await;
 
+                            // Snapshot artifact table max IDs before sync so we can detect
+                            // newly-created artifact rows after sync completes (SSE-06, SSE-07)
+                            let (file_op_snap, git_op_snap) = snapshot_artifact_ids(&conn).await;
+
                             // Sync the file
                             match claude_history_store::sync::sync_file(&conn, path, &session_id).await {
                                 Ok(result) if result.records_synced > 0 => {
@@ -410,6 +566,13 @@ pub async fn watcher_loop(
 
                                     // SSE-05: version:changed
                                     check_version_change(&mut state, &conn, &session_id, &event_tx).await;
+
+                                    // SSE-06, SSE-07: file:written, file:edited, git:commit
+                                    emit_artifact_events(
+                                        &conn, &session_id,
+                                        file_op_snap, git_op_snap,
+                                        &event_tx,
+                                    ).await;
 
                                     state.data_ingested_since_fts_rebuild = true;
                                 }
@@ -468,16 +631,21 @@ pub async fn watcher_loop(
             }
 
             // Branch (c): periodic FTS rebuild check (every 30 seconds)
+            // Rebuilds both message content and file operations FTS5 indexes.
             _ = tokio::time::sleep(Duration::from_secs(30)) => {
                 if state.data_ingested_since_fts_rebuild
                     && state.last_fts_rebuild.elapsed() >= Duration::from_secs(30)
                 {
                     match conn
-                        .call(|conn| claude_history_store::fts::rebuild_fts_index(conn))
+                        .call(|conn| -> Result<(), rusqlite::Error> {
+                            claude_history_store::fts::rebuild_fts_index(conn)?;
+                            claude_history_store::fts::rebuild_fts_file_operations(conn)?;
+                            Ok(())
+                        })
                         .await
                     {
                         Ok(()) => {
-                            tracing::info!("Periodic FTS rebuild complete");
+                            tracing::info!("Periodic FTS rebuild complete (message content + file operations)");
                         }
                         Err(e) => {
                             tracing::warn!(
