@@ -13,7 +13,7 @@ provides:
   - tool_result -> tool_executions UPDATE via tool_use_id matching (ART-04)
   - decompose_artifacts_retroactive function for backfilling artifact tables from existing tool_executions
   - sync_all integration calling retroactive decomposition after file sync loop
-affects: [05-04, 05-05, 05-06]
+affects: [05-04, 05-05, 05-06, 05-07, 05-08]
 
 tech-stack:
   added: []

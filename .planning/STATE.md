@@ -11,8 +11,8 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 
 Phase: 5 of 6 (Artifact Layer) -- IN PROGRESS
 Plan: 3 of 8 complete in current phase
-Status: Plan 05-03 (Tool Result Matching) complete. Wave 2 continues (Plan 04 ready).
-Last activity: 2026-02-20 -- Completed 05-03-PLAN.md (ART-04 tool result matching, retroactive decomposition)
+Status: Plan 05-03 (Tool Result Matching) finalized. Wave 2 continues (Plan 04 ready).
+Last activity: 2026-02-20 -- Finalized 05-03-SUMMARY.md (ART-04 tool result matching, retroactive decomposition)
 
 Progress: [████████░░] ~78% (18 of ~23 total plans)
 
@@ -105,5 +105,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 5, Plan 03 complete. Wave 2 continues (Plan 04 ready).
-Resume file: /gsd:execute-phase 5
+Stopped at: Phase 5, Plan 03 finalized. Wave 2 continues (Plan 04 ready).
+Resume file: /gsd:execute-plan .planning/phases/05-artifact-layer/05-04-PLAN.md
