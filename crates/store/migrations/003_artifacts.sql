@@ -75,9 +75,9 @@ CREATE INDEX idx_git_operations_timestamp ON git_operations(timestamp);
 -- Indexes content, old_content, and command columns for full-text search.
 -- Requires manual rebuild after sync operations, same as fts_message_content.
 CREATE VIRTUAL TABLE fts_file_operations USING fts5(
-    content_col,
-    old_content_col,
-    command_col,
+    content,
+    old_content,
+    command,
     content='file_operations',
     content_rowid='id',
     tokenize='unicode61'
