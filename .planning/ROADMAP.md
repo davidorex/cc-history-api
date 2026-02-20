@@ -85,11 +85,11 @@ Plans:
   2. A client connected to GET /v1/events receives record:added and session:started SSE events as new JSONL data is written by Claude Code
   3. schema:drift and version:changed SSE events fire when new overflow fields or Claude Code version changes are detected during live ingestion
   4. The file watcher debounces rapid writes (minimum 2-second gap per file) and recovers gracefully from transient filesystem errors
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: TBD
-- [ ] 04-02: TBD
+- [ ] 04-01-PLAN.md — SSE event types, broadcast channel in AppState, GET /v1/events endpoint
+- [ ] 04-02-PLAN.md — File watcher module with debounce, sync triggering, SSE event emission, version detection
 
 ### Phase 5: Artifact Layer
 **Goal**: Users can query what files Claude Code touched, what git operations it performed, reconstruct file content at any point in a session, and view a unified timeline of all artifacts produced
@@ -132,6 +132,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
-| 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
+| 4. Real-Time Ingestion and Events | 0/2 | Planned | - |
 | 5. Artifact Layer | 0/3 | Not started | - |
 | 6. Version Monitoring | 0/1 | Not started | - |

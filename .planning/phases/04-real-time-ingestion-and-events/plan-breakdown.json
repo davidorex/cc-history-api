@@ -1,0 +1,81 @@
+{
+  "phase": "04-real-time-ingestion-and-events",
+  "total_plans": 2,
+  "total_tasks": 4,
+  "waves": 2,
+  "plans": [
+    {
+      "plan_id": "04-01",
+      "name": "SSE event types, broadcast channel, and /v1/events endpoint",
+      "wave": 1,
+      "depends_on": [],
+      "autonomous": true,
+      "type": "execute",
+      "requirements": ["SSE-01", "SSE-02", "SSE-03", "SSE-04", "SSE-05"],
+      "files_modified": [
+        "Cargo.toml",
+        "crates/server/Cargo.toml",
+        "crates/server/src/events.rs",
+        "crates/server/src/state.rs",
+        "crates/server/src/api/mod.rs",
+        "crates/server/src/lib.rs"
+      ],
+      "tasks": [
+        {
+          "name": "Add workspace dependencies and create SseEvent types + SSE handler",
+          "type": "auto",
+          "files": ["Cargo.toml", "crates/server/Cargo.toml", "crates/server/src/events.rs", "crates/server/src/lib.rs"],
+          "estimated_context": "20%"
+        },
+        {
+          "name": "Extend AppState with broadcast channel and register SSE route",
+          "type": "auto",
+          "files": ["crates/server/src/state.rs", "crates/server/src/api/mod.rs", "crates/server/src/serve.rs", "crates/server/src/main.rs"],
+          "estimated_context": "20%"
+        }
+      ],
+      "estimated_total_context": "40%"
+    },
+    {
+      "plan_id": "04-02",
+      "name": "File watcher module with debounce, sync triggering, and SSE event emission",
+      "wave": 2,
+      "depends_on": ["04-01"],
+      "autonomous": true,
+      "type": "execute",
+      "requirements": ["WATCH-01", "WATCH-02", "WATCH-03", "SSE-02", "SSE-03", "SSE-04", "SSE-05"],
+      "files_modified": [
+        "crates/server/Cargo.toml",
+        "crates/server/src/watcher.rs",
+        "crates/server/src/lib.rs",
+        "crates/server/src/serve.rs",
+        "crates/server/src/main.rs"
+      ],
+      "tasks": [
+        {
+          "name": "Create watcher module with FileDebouncer, spawn_watcher, and watcher_loop",
+          "type": "auto",
+          "files": ["crates/server/Cargo.toml", "crates/server/src/watcher.rs", "crates/server/src/lib.rs"],
+          "estimated_context": "30%"
+        },
+        {
+          "name": "Wire watcher into serve.rs and update main.rs with projects_dir parameter",
+          "type": "auto",
+          "files": ["crates/server/src/serve.rs", "crates/server/src/main.rs"],
+          "estimated_context": "15%"
+        }
+      ],
+      "estimated_total_context": "45%"
+    }
+  ],
+  "requirement_coverage": {
+    "WATCH-01": ["04-02"],
+    "WATCH-02": ["04-02"],
+    "WATCH-03": ["04-02"],
+    "SSE-01": ["04-01"],
+    "SSE-02": ["04-01", "04-02"],
+    "SSE-03": ["04-01", "04-02"],
+    "SSE-04": ["04-01", "04-02"],
+    "SSE-05": ["04-01", "04-02"]
+  }
+}
