@@ -56,17 +56,26 @@ pub fn decompose_record(
     session_id_from_file: &str,
     tx: &Transaction,
 ) -> Result<DecomposeResult, DecomposeError> {
-    match record {
-        JSONLRecord::User(r) => decompose_user(r, tx),
-        JSONLRecord::Assistant(r) => decompose_assistant(r, tx),
-        JSONLRecord::Progress(r) => decompose_progress(r, tx),
-        JSONLRecord::System(r) => decompose_system(r, tx),
-        JSONLRecord::QueueOperation(r) => decompose_queue_operation(r, tx),
-        JSONLRecord::Summary(r) => decompose_summary(r, session_id_from_file, tx),
+    let mut result = match record {
+        JSONLRecord::User(r) => decompose_user(r, tx)?,
+        JSONLRecord::Assistant(r) => decompose_assistant(r, tx)?,
+        JSONLRecord::Progress(r) => decompose_progress(r, tx)?,
+        JSONLRecord::System(r) => decompose_system(r, tx)?,
+        JSONLRecord::QueueOperation(r) => decompose_queue_operation(r, tx)?,
+        JSONLRecord::Summary(r) => decompose_summary(r, session_id_from_file, tx)?,
         JSONLRecord::FileHistorySnapshot(r) => {
-            decompose_file_history_snapshot(r, session_id_from_file, tx)
+            decompose_file_history_snapshot(r, session_id_from_file, tx)?
         }
-    }
+    };
+
+    // Second pass: artifact extraction from tool_use blocks.
+    // Runs in same transaction for atomicity. Produces file_operations
+    // and git_operations rows from Write/Edit/Read/Bash tool inputs.
+    // Returns 0 for record types without tool_use blocks (non-assistant).
+    result.rows_inserted +=
+        crate::artifacts::decompose_artifacts(record, session_id_from_file, tx)?;
+
+    Ok(result)
 }
 
 /// Upsert a session row from a full-base record's RecordBase.
