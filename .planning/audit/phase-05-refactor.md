@@ -444,3 +444,145 @@ Note: Column renames (M1-M3) and the denormalized file_path (M4) are deeply embe
 | `crates/server/src/api/files.rs` | 5e | FileQueryBody expansion, query_files handler rewrite |
 | `crates/server/src/api/git.rs` | 5g | Temporal filter params |
 | `crates/server/src/api/artifacts_api.rs` | 5c, 5d | SessionArtifacts response update, ArtifactEvent return type |
+
+---
+
+## 10. Demo Requirements
+
+After refactoring, `/gsd:demo-phase` must capture evidence for each sub-phase. These demos validate spec compliance for the artifact layer — the most deviation-heavy phase.
+
+### Demo 1: result_summary and is_error exist on artifact tables (5a)
+
+**Validates:** C1, C2 (spec section 2.1 DDL — columns on file_operations and git_operations)
+**Category:** database verify
+
+```
+$ sqlite3 $DB "PRAGMA table_info(file_operations)" | grep -E 'result_summary|is_error'
+→ both columns must appear
+
+$ sqlite3 $DB "PRAGMA table_info(git_operations)" | grep -E 'result_summary|is_error'
+→ both columns must appear
+
+$ sqlite3 $DB "SELECT operation_type, is_error, SUBSTR(result_summary,1,80) FROM file_operations WHERE result_summary IS NOT NULL LIMIT 3"
+→ must return rows with populated values
+```
+
+**Observation target:** Migration 004 added columns. Data is populated.
+
+### Demo 2: match_tool_results links tool_use to tool_result (5b)
+
+**Validates:** C3 (spec section 2.3 — match_tool_results function)
+**Category:** database verify
+
+```
+$ sqlite3 $DB "SELECT fo.operation_type, fo.is_error, SUBSTR(fo.result_summary,1,100) FROM file_operations fo WHERE fo.is_error = 1 LIMIT 5"
+→ must return file operations where the tool call errored
+
+$ sqlite3 $DB "SELECT COUNT(*) as with_result, (SELECT COUNT(*) FROM file_operations) as total FROM file_operations WHERE result_summary IS NOT NULL"
+→ with_result should be a significant fraction of total (tool_results matched)
+```
+
+**Observation target:** Tool result matching populates result_summary and is_error from the subsequent user message's tool_result blocks. Failed operations are identifiable without JOINing to tool_executions.
+
+### Demo 3: SessionArtifacts with aggregates and session_id (5c)
+
+**Validates:** C4, C5 (spec section 4.2 — total_writes, total_edits, total_reads, total_git_commits, session_id)
+**Category:** API curl
+
+```
+$ curl -s http://localhost:7424/v1/artifacts/SESSION_ID | jq '{session_id, total_writes, total_edits, total_reads, total_git_commits}'
+→ all 5 fields must be present
+→ session_id must equal the requested SESSION_ID
+→ total_writes + total_edits + total_reads must be > 0 for an active session
+```
+
+**Observation target:** Response includes computed aggregates matching spec struct. `session_id` field present at top level.
+
+### Demo 4: FileOperation and GitOperation include result_summary and is_error (5c)
+
+**Validates:** C1, C2 at API level (spec section 4.2 — response type fields)
+**Category:** API curl
+
+```
+$ curl -s "http://localhost:7424/v1/files/1" | jq '.operations[0] | {operation_id: .operation_id, result_summary, is_error}'
+→ operation_id (not id), result_summary, and is_error must all be present
+
+$ curl -s http://localhost:7424/v1/git?limit=1 | jq '.[0] | {result_summary, is_error}'
+→ both fields present
+```
+
+**Observation target:** API response types include the two missing spec fields.
+
+### Demo 5: ArtifactEvent tagged enum on timeline (5d)
+
+**Validates:** C7 (spec section 4.2 — `#[serde(tag = "kind")]` enum with "file" and "git")
+**Category:** API curl
+
+```
+$ curl -s http://localhost:7424/v1/artifacts/SESSION_ID/timeline?limit=10 | jq '[.[] | .kind] | unique'
+→ must contain "file" and/or "git" (not "file_operation", "git_operation")
+
+$ curl -s http://localhost:7424/v1/artifacts/SESSION_ID/timeline?limit=5 | jq '.[0]'
+→ must have "kind" field (not "entry_type")
+→ file events must have FileOperation fields nested directly
+→ git events must have GitOperation fields nested directly
+```
+
+**Observation target:** Timeline response uses tagged enum serialization. `kind` discriminant, not `entry_type` string.
+
+### Demo 6: POST /v1/files/query accepts full spec body (5e)
+
+**Validates:** C6 (spec section 4.4 — 7 filter parameters)
+**Category:** API curl
+
+```
+$ curl -s -X POST http://localhost:7424/v1/files/query \
+  -H "Content-Type: application/json" \
+  -d '{"file_paths":["**/*.rs"],"operation_types":["write","edit"],"limit":5}' | jq '.[0].operation_type'
+→ must return FileOperation objects (not FileEntry)
+→ operation_type must be "write" or "edit"
+
+$ curl -s -X POST http://localhost:7424/v1/files/query \
+  -H "Content-Type: application/json" \
+  -d '{"content_contains":"async fn","limit":3}' | jq '. | length'
+→ must return operations whose content contains "async fn"
+
+$ curl -s -X POST http://localhost:7424/v1/files/query \
+  -H "Content-Type: application/json" \
+  -d '{"file_paths":["**/*.rs"],"include_content":false,"limit":3}' | jq '.[0] | has("content")'
+→ must return false (content stripped when include_content=false)
+
+$ curl -s -X POST http://localhost:7424/v1/files/query \
+  -H "Content-Type: application/json" \
+  -d '{"session_ids":["S1","S2"],"after":"2026-02-20","limit":5}' | jq '. | length'
+→ must accept session_ids array and after date filter
+```
+
+**Observation target:** All 7 spec parameters accepted. Return type is `[FileOperation]` not `[FileEntry]`. Filters compose — any subset works.
+
+### Demo 7: Git temporal filters (5g)
+
+**Validates:** M9 (spec section 4.1 — `?after=&before=` on GET /v1/git)
+**Category:** API curl
+
+```
+$ curl -s "http://localhost:7424/v1/git?after=2026-02-20&limit=5" | jq '. | length'
+→ must return only git operations after the date
+
+$ curl -s "http://localhost:7424/v1/git?before=2026-01-01&limit=5" | jq '. | length'
+→ must return 0 or only operations before that date
+```
+
+**Observation target:** Temporal filters applied to git operations endpoint.
+
+### Demo 8: NotebookEdit produces file_operations (5f)
+
+**Validates:** M7 (spec section 2.3 — NotebookEdit dispatched as write)
+**Category:** database verify
+
+```
+$ sqlite3 $DB "SELECT fo.operation_type, fo.file_path FROM file_operations fo WHERE fo.file_path LIKE '%.ipynb' LIMIT 5"
+→ must return rows for Jupyter notebook files (if any exist in ingested data)
+```
+
+**Observation target:** NotebookEdit tool_use blocks produce file_operations rows. If no NotebookEdit data exists in the user's history, this demo is marked [HUMAN] with instructions to verify against a test fixture.

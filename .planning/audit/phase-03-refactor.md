@@ -489,3 +489,134 @@ These are needed for CLI subcommands that route through the daemon.
 | Refactoring items | 11 (R-1 through R-11) |
 
 **Overall assessment:** All 28 endpoints exist and are routable. The primary structural gaps are in the composable query body designs (POST /v1/messages/query and POST /v1/files/query), where the implementation uses singular-valued filters instead of the spec's array-valued composable pattern. The response type structs are close but have naming mismatches and missing fields (result_summary, is_error). The UDS infrastructure is solid. The SSE event payloads have minor data shape differences from the spec examples.
+
+---
+
+## Demo Requirements
+
+After refactoring, `/gsd:demo-phase` must capture evidence for each item. Phase 3 demos validate the API handler layer, response shapes, DaemonClient routing, and date range filters. Phase 3 depends on Phase 2 (composable query compiler) and Phase 5 (artifact queries) completing first.
+
+### Demo 1: All 28 endpoints return non-error HTTP status
+
+**Validates:** All endpoints remain routable after refactor
+**Category:** API curl
+
+```
+$ ./target/debug/claude-history serve &
+$ sleep 2
+$ for endpoint in \
+    "/v1/health" \
+    "/v1/sessions?limit=1" \
+    "/v1/search?q=test" \
+    "/v1/analytics/tokens" \
+    "/v1/analytics/tools" \
+    "/v1/analytics/models" \
+    "/v1/schema/versions" \
+    "/v1/schema/drift" \
+    "/v1/files?limit=1" \
+    "/v1/files/search?q=test" \
+    "/v1/git?limit=1" \
+    "/v1/git/commits?limit=1" \
+    "/v1/events"; do
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:7424$endpoint)
+  echo "$endpoint: $STATUS"
+done
+→ all must return 200 (except /v1/events which is SSE stream)
+```
+
+**Observation target:** No endpoints broken by refactor. All return 200 or appropriate status.
+
+### Demo 2: Response field names match spec section 4.2
+
+**Validates:** T-1 through T-6 (FileEntry uses file_id/first_seen_at/last_modified_at, FileOperation uses operation_id, result_summary/is_error present)
+**Category:** API curl
+
+```
+$ curl -s http://localhost:7424/v1/files?limit=1 | jq '.[0] | keys'
+→ must contain "file_id", "first_seen_at", "last_modified_at" (not "id", "first_seen", "last_modified")
+
+$ curl -s "http://localhost:7424/v1/files/1" | jq '.operations[0] | keys'
+→ must contain "operation_id", "result_summary", "is_error" (not "id")
+
+$ curl -s http://localhost:7424/v1/git?limit=1 | jq '.[0] | keys'
+→ must contain "result_summary", "is_error"
+```
+
+**Observation target:** JSON field names in responses match spec section 4.2 type definitions exactly.
+
+### Demo 3: SessionArtifacts includes aggregates and session_id
+
+**Validates:** AR-1 (spec section 4.2 — total_writes, total_edits, total_reads, total_git_commits)
+**Category:** API curl
+
+```
+$ curl -s http://localhost:7424/v1/artifacts/SESSION_ID | jq '{session_id, total_writes, total_edits, total_reads, total_git_commits}'
+→ all 5 fields must be present and numeric
+```
+
+**Observation target:** SessionArtifacts response matches spec struct with computed aggregates.
+
+### Demo 4: Analytics date range filters
+
+**Validates:** A-1, A-2 (spec section 4.1 — analytics/tokens and analytics/tools accept after/before)
+**Category:** API curl
+
+```
+$ curl -s "http://localhost:7424/v1/analytics/tokens?after=2026-02-20&group_by=model" | jq '. | length'
+→ must return filtered results (fewer than unfiltered)
+
+$ curl -s "http://localhost:7424/v1/analytics/tools?session_id=SESSION_ID" | jq '.[0]'
+→ must return tool frequency filtered to one session
+```
+
+**Observation target:** Date range and session_id filters work on analytics endpoints.
+
+### Demo 5: Files and git date range filters
+
+**Validates:** F-1, G-2 (spec section 4.1 — files and git accept after/before)
+**Category:** API curl
+
+```
+$ curl -s "http://localhost:7424/v1/files?after=2026-02-20&limit=5" | jq '. | length'
+→ must return only files modified after the date
+
+$ curl -s "http://localhost:7424/v1/git?after=2026-02-20&limit=5" | jq '. | length'
+→ must return only git operations after the date
+```
+
+**Observation target:** Temporal filters work on artifact list endpoints.
+
+### Demo 6: DaemonClient routes all artifact subcommands
+
+**Validates:** R-9 (missing DaemonClient methods for 7 artifact endpoints)
+**Category:** CLI exec
+
+```
+$ ./target/debug/claude-history serve &
+$ sleep 2
+
+$ ./target/debug/claude-history files --limit 3
+→ must return file table (routed through daemon)
+
+$ ./target/debug/claude-history git-log --limit 3
+→ must return git operations (routed through daemon)
+
+$ ./target/debug/claude-history artifacts SESSION_ID
+→ must return combined view (routed through daemon)
+
+$ kill %1
+```
+
+**Observation target:** CLI subcommands for files, git-log, and artifacts route through the daemon socket when daemon is running, rather than opening the DB directly.
+
+### Demo 7: Sessions status filter
+
+**Validates:** S-1 (spec section 4.1 — `?status=` filter on sessions list)
+**Category:** API curl
+
+```
+$ curl -s "http://localhost:7424/v1/sessions?status=active&limit=3" | jq '. | length'
+→ must return only active sessions (or empty if none match)
+```
+
+**Observation target:** The `?status=` query parameter is accepted and filters results.

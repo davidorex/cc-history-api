@@ -258,3 +258,143 @@ Only if the normalized file_id FK design is preferred over the current denormali
 | MINOR | 4 | DEV-08, DEV-09, DEV-10, DEV-12 |
 
 The critical deviations (DEV-01, DEV-05, DEV-11) represent the gap between the spec's intent of a composable query compiler and the implementation's fixed-parameter function approach. Steps 1-3 of the refactoring plan resolve all critical and moderate deviations in a single cohesive change.
+
+---
+
+## Demo Requirements
+
+After refactoring, `/gsd:demo-phase` must capture evidence for each item. These demos validate the composable query compiler works as spec section 4.5 describes.
+
+### Demo 1: Multi-session query (session_ids array)
+
+**Validates:** DEV-01, DEV-11 (spec section 4.5 — `"session_ids": ["abc", "def"]`)
+**Category:** API curl
+**Spec reference:** `POST /v1/messages/query` accepts `session_ids` as array
+
+```
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"session_ids":["SESSION_1","SESSION_2"],"limit":5}' | jq '. | length'
+→ must return messages from both sessions
+
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"session_ids":["SESSION_1","SESSION_2"],"limit":5}' | jq '[.[].session_id] | unique'
+→ must contain both session IDs
+```
+
+**Observation target:** Query compiler generates `session_id IN (?, ?)` for array input. Results span multiple sessions.
+
+### Demo 2: Multi-type and multi-tool filters (plural arrays)
+
+**Validates:** DEV-02, DEV-03, DEV-04 (spec section 4.5 — `message_types`, `models`, `tool_names` as arrays)
+**Category:** API curl
+
+```
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"message_types":["assistant"],"tool_names":["Edit","Write"],"limit":5}' | jq '.[0]'
+→ must return assistant messages that used Edit or Write tools
+
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"models":["claude-opus-4-5-20251101","claude-opus-4-6"],"limit":3}' | jq '[.[].model] | unique'
+→ must contain results from both models
+```
+
+**Observation target:** Array-valued filters generate `IN (?, ?)` clauses. Results match filter criteria.
+
+### Demo 3: content_contains integrates FTS into query compiler
+
+**Validates:** DEV-05 (spec section 4.5 — `"content_contains": "git commit"`)
+**Category:** API curl
+
+```
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"content_contains":"authentication","message_types":["assistant"],"limit":3}' | jq '.[0].uuid'
+→ must return assistant messages whose content blocks contain "authentication"
+
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"content_contains":"xyzzy_nonexistent_term","limit":3}' | jq '. | length'
+→ must return 0 (no matches)
+```
+
+**Observation target:** FTS search is wired into the composable query compiler, not isolated in a separate endpoint. Zero results for non-matching terms proves filtering is applied.
+
+### Demo 4: is_sidechain and min_input_tokens filters
+
+**Validates:** DEV-06, DEV-07 (spec section 4.5 — `is_sidechain`, `min_input_tokens`)
+**Category:** API curl
+
+```
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"is_sidechain":false,"limit":3}' | jq '.[0]'
+→ must return only non-sidechain messages
+
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"min_input_tokens":50000,"message_types":["assistant"],"limit":3}' | jq '. | length'
+→ must return only messages with >= 50000 input tokens
+```
+
+**Observation target:** Both filters generate correct WHERE/JOIN clauses against messages.is_sidechain and token_usage.input_tokens.
+
+### Demo 5: Offset pagination
+
+**Validates:** DEV-08 (spec section 4.5 — `"offset": 0`)
+**Category:** API curl
+
+```
+$ FIRST=$(curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"limit":1,"offset":0}' | jq -r '.[0].uuid')
+
+$ SECOND=$(curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{"limit":1,"offset":1}' | jq -r '.[0].uuid')
+
+$ [ "$FIRST" != "$SECOND" ] && echo "PASS: different results" || echo "FAIL: same result"
+→ must be different UUIDs
+```
+
+**Observation target:** Offset pagination returns different result windows.
+
+### Demo 6: All filters compose in single query
+
+**Validates:** DEV-11 architectural (spec section 4.5 — composable query compiler)
+**Category:** API curl
+
+```
+$ curl -s -X POST http://localhost:7424/v1/messages/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message_types": ["assistant"],
+    "tool_names": ["Bash", "Edit"],
+    "content_contains": "commit",
+    "is_sidechain": false,
+    "min_input_tokens": 1000,
+    "limit": 5,
+    "offset": 0
+  }' | jq '. | length'
+→ must return results (or 0 if no matches, but must not error)
+```
+
+**Observation target:** Six filters applied simultaneously. Server returns 200 OK. This is the composability proof — any subset of spec filters works in any combination.
+
+### Demo 7: CLI --contains flag
+
+**Validates:** DEV-10 (spec section 4.7 — `claude-history query --contains "text"`)
+**Category:** CLI exec
+
+```
+$ ./target/debug/claude-history query --contains "refactor" --type assistant --limit 3 --json | jq '. | length'
+→ must return matching messages
+
+$ ./target/debug/claude-history query --contains "xyzzy_nonexistent" --json | jq '. | length'
+→ must return 0
+```
+
+**Observation target:** CLI wraps content_contains into MessageQueryParams and routes through query compiler.

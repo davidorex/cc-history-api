@@ -307,3 +307,94 @@ These are the most impactful changes because they affect the API contract that c
 | `crates/core/src/version.rs` | New file for VersionMonitor (item 5.7) |
 | `crates/core/src/lib.rs` | Module declaration for version.rs (item 5.7) |
 | `crates/server/src/serve.rs` | Spawn version monitor loop (item 5.7) |
+
+---
+
+## Demo Requirements
+
+After refactoring, `/gsd:demo-phase` must capture evidence for each SSE payload shape and watcher behavior. SSE demos require starting the daemon and triggering events via sync.
+
+### Demo 1: version:changed event uses spec field names
+
+**Validates:** Deviation 4 (spec section 4.6 — `{from, to}` not `{old_version, new_version}`)
+**Category:** API curl (SSE capture)
+
+```
+$ ./target/debug/claude-history serve --projects-dir ~/.claude/projects &
+$ sleep 2
+$ timeout 5 curl -sN http://localhost:7424/v1/events > /tmp/sse-capture.txt &
+$ # Trigger a sync that encounters a version change (may need test fixture)
+$ sleep 6
+$ grep "version:changed" /tmp/sse-capture.txt | head -1
+→ data payload must contain "from" and "to" keys (not "old_version", "new_version")
+```
+
+**Observation target:** Field names in JSON payload match spec example exactly.
+
+### Demo 2: file:written event includes operation and timestamp
+
+**Validates:** Deviation 5 (spec section 4.6 — file:written has `{session_id, file_path, operation, timestamp}`)
+**Category:** API curl (SSE capture)
+
+```
+$ timeout 15 curl -sN http://localhost:7424/v1/events > /tmp/sse-capture.txt &
+$ # Trigger activity that produces file:written events (start a Claude Code session, or sync test data)
+$ sleep 16
+$ grep "file:written" /tmp/sse-capture.txt | head -1 | sed 's/data: //' | jq 'keys'
+→ must contain "session_id", "file_path", "operation", "timestamp", "message_uuid"
+```
+
+**Observation target:** All spec-required fields present. `operation` field value is `"write"`. `timestamp` is an ISO 8601 string.
+
+### Demo 3: file:edited event includes old_content and new_content
+
+**Validates:** Deviation 6 (spec section 4.6 — file:edited has `{old_content, new_content}`)
+**Category:** API curl (SSE capture)
+
+```
+$ grep "file:edited" /tmp/sse-capture.txt | head -1 | sed 's/data: //' | jq 'keys'
+→ must contain "old_content", "new_content", "operation", "session_id", "file_path"
+```
+
+**Observation target:** Edit diff content is included in the SSE event payload, not just file identity. Consumers can see what changed without a follow-up API call.
+
+### Demo 4: schema:drift event has field names array and version
+
+**Validates:** Deviation 3 (spec section 4.6 — `new_fields` is array of strings, includes `version` and `type`)
+**Category:** API curl (SSE capture)
+
+```
+$ grep "schema:drift" /tmp/sse-capture.txt | head -1 | sed 's/data: //' | jq '{new_fields: (.new_fields | type), version, drift_type}'
+→ new_fields must be "array" (not "number")
+→ version must be a string
+→ drift_type must be present (e.g., "additive")
+```
+
+**Observation target:** `new_fields` is an array of field name strings (not an integer count). `version` identifies which Claude Code version introduced the drift.
+
+### Demo 5: session:started event has project_path and version
+
+**Validates:** Deviation 2 (spec section 4.6 — `{session_id, project_path, version}`)
+**Category:** API curl (SSE capture)
+
+```
+$ grep "session:started" /tmp/sse-capture.txt | head -1 | sed 's/data: //' | jq '{session_id, project_path, version}'
+→ all three fields must be present and non-null
+→ project_path must be an absolute path
+```
+
+**Observation target:** session:started carries enough context for consumers to filter by project without a follow-up query.
+
+### Demo 6: record:added granularity decision [HUMAN]
+
+**Validates:** Deviation 1 (spec section 4.6 — per-record vs batch semantics)
+**Requires:** Review the captured record:added events and decide:
+- If per-record: each event has `{uuid, type, timestamp, session_id}` for a single record
+- If batch: document the deviation as intentional with rationale
+**Expected:** Either per-record events matching spec example, or documented rationale for batch semantics
+
+### Demo 7: VersionMonitor periodic check [HUMAN]
+
+**Validates:** Deviation 9 (spec section 3.2 — periodic version check loop)
+**Requires:** Start daemon, wait 5+ minutes, check logs for periodic version check output even without new JSONL data flowing in
+**Expected:** Log entries showing version checks at regular intervals, independent of file watcher events

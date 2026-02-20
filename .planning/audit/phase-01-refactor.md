@@ -436,6 +436,55 @@ These deviations are intentional, well-documented, or improvements. No refactori
 
 ---
 
+## Demo Requirements
+
+After refactoring, `/gsd:demo-phase` must capture evidence for each item. These demos validate spec compliance, not just compilation.
+
+### Demo 1: NotebookEdit produces file_operations rows
+
+**Validates:** R1 (spec section 2.3 — NotebookEdit dispatched as write)
+**Category:** database verify
+**Strategy:** Sync data containing NotebookEdit tool_use blocks, then query file_operations.
+
+```
+$ sqlite3 $DB "SELECT COUNT(*) FROM file_operations fo JOIN tool_executions te ON fo.tool_use_id = te.tool_use_id WHERE te.tool_name = 'NotebookEdit'"
+→ must be > 0
+```
+
+**Observation target:** NotebookEdit tool_use blocks produce file_operations rows with operation_type='write', file_path extracted from notebook_path input field.
+
+### Demo 2: result_summary and is_error columns exist and are populated
+
+**Validates:** R2 (spec section 2.1 DDL — result_summary TEXT, is_error BOOLEAN on file_operations and git_operations)
+**Category:** database verify
+
+```
+$ sqlite3 $DB "PRAGMA table_info(file_operations)" | grep -E 'result_summary|is_error'
+→ both columns must appear
+
+$ sqlite3 $DB "SELECT operation_type, is_error, SUBSTR(result_summary,1,80) FROM file_operations WHERE result_summary IS NOT NULL LIMIT 5"
+→ must return rows with populated values
+
+$ sqlite3 $DB "SELECT operation_type, is_error, SUBSTR(result_summary,1,80) FROM git_operations WHERE result_summary IS NOT NULL LIMIT 3"
+→ must return rows with populated values
+```
+
+**Observation target:** Migration 004 added columns. Artifact decomposer populates them from tool_result matching.
+
+### Demo 3: Backfill populates existing rows
+
+**Validates:** R2 backfill step — existing file_operations/git_operations rows from before migration get result_summary/is_error from tool_executions
+**Category:** database verify
+
+```
+$ sqlite3 $DB "SELECT COUNT(*) as total, SUM(CASE WHEN result_summary IS NOT NULL THEN 1 ELSE 0 END) as populated FROM file_operations"
+→ populated count should be > 0 for rows that have matching tool_executions
+```
+
+**Observation target:** Retroactive backfill works for pre-existing data, not just newly ingested records.
+
+---
+
 ## Summary
 
 Phase 1 is **substantially conformant** with the spec. The implementation is a superset that handles more record types, provides better error isolation, uses more robust patterns for polymorphic data, and adds async/batch capabilities. The single actionable refactoring item (R1: NotebookEdit support) is a small addition. The query ergonomics item (R2: error status on artifact tables) is a judgment call depending on upcoming API requirements.
