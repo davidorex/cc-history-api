@@ -1,14 +1,18 @@
 //! claude-history CLI binary.
 //!
 //! Provides the `claude-history` command with subcommands for syncing JSONL
-//! session files into a local SQLite database.
+//! session files into a local SQLite database, searching message content,
+//! browsing sessions, querying messages, and viewing usage statistics.
 //!
 //! Usage:
 //!   claude-history sync [--projects-dir <path>] [--db-path <path>]
+//!   claude-history search <query> [--limit N] [--json]
+//!   claude-history sessions [--project <path>] [--after <date>] [--before <date>] [--limit N] [--json]
+//!   claude-history query [--session-id <id>] [--type <type>] [--model <m>] [--tool <t>] [--limit N]
+//!   claude-history stats [--session-id <id>] [--json]
 //!
-//! The sync command discovers all .jsonl files under the projects directory,
-//! parses them incrementally from their last known byte offset, decomposes
-//! records into normalized SQLite tables, and reports a summary.
+//! All subcommands share a global --db-path option. Logs go to stderr,
+//! structured output to stdout (PAT-020).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -16,9 +20,16 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod output;
+
 #[derive(Parser)]
 #[command(name = "claude-history", about = "Claude Code session history API")]
 struct Cli {
+    /// Path to the database file.
+    /// Defaults to $CLAUDE_HISTORY_DB_PATH or ~/.claude/.claude-history.db
+    #[arg(long, global = true)]
+    db_path: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -31,11 +42,68 @@ enum Commands {
         /// Defaults to ~/.claude/projects/
         #[arg(long)]
         projects_dir: Option<PathBuf>,
-
-        /// Path to the database file.
-        /// Defaults to $CLAUDE_HISTORY_DB_PATH or ~/.claude/.claude-history.db
+    },
+    /// Search message content using full-text search
+    Search {
+        /// Search query (FTS5 phrase matching)
+        query: String,
+        /// Maximum results to return
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Output as JSON
         #[arg(long)]
-        db_path: Option<PathBuf>,
+        json: bool,
+    },
+    /// List sessions with optional filters
+    Sessions {
+        /// Filter by project path (substring match)
+        #[arg(long)]
+        project: Option<String>,
+        /// Show sessions after this date (YYYY-MM-DD or ISO8601)
+        #[arg(long)]
+        after: Option<String>,
+        /// Show sessions before this date (YYYY-MM-DD or ISO8601)
+        #[arg(long)]
+        before: Option<String>,
+        /// Maximum sessions to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Query messages with filters (always outputs JSON)
+    Query {
+        /// Filter by session ID
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Filter by message type (user, assistant)
+        #[arg(long, name = "type")]
+        message_type: Option<String>,
+        /// Filter by model name
+        #[arg(long)]
+        model: Option<String>,
+        /// Filter by tool name used
+        #[arg(long)]
+        tool: Option<String>,
+        /// Show messages after this date
+        #[arg(long)]
+        after: Option<String>,
+        /// Show messages before this date
+        #[arg(long)]
+        before: Option<String>,
+        /// Maximum results
+        #[arg(long, default_value = "100")]
+        limit: usize,
+    },
+    /// Show token usage, tool frequency, and model breakdown statistics
+    Stats {
+        /// Filter stats to a specific session
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -93,12 +161,11 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Sync {
-            projects_dir,
-            db_path,
-        } => {
-            run_sync(projects_dir, db_path).await
-        }
+        Commands::Sync { projects_dir } => run_sync(projects_dir, cli.db_path).await,
+        Commands::Search { .. } => todo!("search handler — Task 2"),
+        Commands::Sessions { .. } => todo!("sessions handler — Task 2"),
+        Commands::Query { .. } => todo!("query handler — Task 2"),
+        Commands::Stats { .. } => todo!("stats handler — Task 2"),
     }
 }
 

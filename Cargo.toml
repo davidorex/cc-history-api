@@ -14,3 +14,5 @@ clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 anyhow = "1"
 thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+csv = "1.3"
