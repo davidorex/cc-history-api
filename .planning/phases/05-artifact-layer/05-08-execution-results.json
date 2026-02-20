@@ -1,0 +1,35 @@
+{
+  "plan_path": ".planning/phases/05-artifact-layer/05-08-PLAN.md",
+  "plan_name": "SSE Artifact Events and FTS File Operations Rebuild",
+  "phase": "05-artifact-layer",
+  "plan_prefix": "05-08",
+  "status": "complete",
+  "tasks": [
+    {
+      "name": "Task 1: Add FileWritten, FileEdited, GitCommit variants to SseEvent enum",
+      "status": "complete",
+      "commit_hash": "cf278b7",
+      "commit_type": "feat",
+      "notes": "Added 3 new variants with event_type() and to_json_data() arms. Module doc updated to 7 event types. Clean compile."
+    },
+    {
+      "name": "Task 2: Integrate artifact event emission and FTS file_operations rebuild into watcher_loop",
+      "status": "complete",
+      "commit_hash": "184cebc",
+      "commit_type": "feat",
+      "notes": "Query-based approach: snapshot max(id) before sync, query new rows after sync. FTS timer now rebuilds both message content and file_operations indexes. Added rusqlite re-export import and explicit type annotations on conn.call closures to resolve inference ambiguity."
+    }
+  ],
+  "decisions": [],
+  "issues_logged": [],
+  "deviations": [
+    {
+      "type": "auto-fix",
+      "description": "Added explicit -> Result<_, rusqlite::Error> return type annotations on all new conn.call closures in watcher.rs. Multiple From<rusqlite::Error> impls in scope (ApiError, DbError, DecomposeError, SchemaError, SyncError, tokio_rusqlite::Error) caused type inference ambiguity E0283. This is the same pattern needed by existing closures in the server crate but was not anticipated by the plan."
+    },
+    {
+      "type": "auto-fix",
+      "description": "Added 'use tokio_rusqlite::rusqlite;' import to watcher.rs for rusqlite::params! macro and return type annotations. Server crate does not depend on rusqlite directly per decision [03-01]; accessed via tokio_rusqlite re-export."
+    }
+  ]
+}
