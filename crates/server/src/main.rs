@@ -28,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 mod export;
 mod output;
+mod serve;
 mod state;
 
 #[derive(Parser)]
