@@ -509,6 +509,11 @@ pub async fn detect_connection_mode(
         .await
         .map_err(|e| format!("Failed to open database at {}: {}", db_path.display(), e))?;
 
+    tracing::debug!(
+        db = %db_path.display(),
+        "Connection mode: Direct DB (no responsive daemon)"
+    );
+
     Ok(ConnectionMode::Direct {
         conn,
         db_path,
