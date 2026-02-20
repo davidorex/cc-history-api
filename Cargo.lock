@@ -246,6 +246,7 @@ dependencies = [
  "claude-history-store",
  "csv",
  "futures-util",
+ "glob",
  "http-body-util",
  "hyper",
  "hyper-util",
