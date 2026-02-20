@@ -108,7 +108,7 @@ Plans:
 - [x] 05-02-PLAN.md — Artifact decomposer: Write/Edit/Read/Bash parsing into artifact tables
 - [x] 05-03-PLAN.md — Tool result matching (ART-04) and retroactive artifact decomposition
 - [x] 05-04-PLAN.md — Artifact queries: list files, reconstruction via edit replay, unified diffs
-- [ ] 05-05-PLAN.md — FTS5 file_operations index: rebuild and search functions
+- [x] 05-05-PLAN.md — FTS5 file_operations index: rebuild and search functions
 - [ ] 05-06-PLAN.md — HTTP API handlers: files, git, artifacts (11 new endpoints)
 - [ ] 05-07-PLAN.md — CLI subcommands: files, file-history, reconstruct, git-log, artifacts
 - [ ] 05-08-PLAN.md — SSE events (file:written, file:edited, git:commit) and watcher integration
@@ -138,5 +138,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
-| 5. Artifact Layer | 4/8 | In progress | - |
+| 5. Artifact Layer | 5/8 | In progress | - |
 | 6. Version Monitoring | 0/1 | Not started | - |

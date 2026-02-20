@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 5 of 6 (Artifact Layer) -- IN PROGRESS
-Plan: 4 of 8 complete in current phase
-Status: Plan 05-04 (Artifact Query Layer) finalized. Wave 3 complete. Wave 4 ready (Plans 05, 06).
-Last activity: 2026-02-20 -- Completed 05-04-SUMMARY.md (10 artifact query functions, reconstruction, diffs, timelines)
+Plan: 5 of 8 complete in current phase
+Status: Plan 05-05 (FTS5 File Operations Search) finalized. Wave 4 in progress. Plan 06 next.
+Last activity: 2026-02-20 -- Completed 05-05-SUMMARY.md (FTS5 rebuild and search for file_operations content)
 
-Progress: [████████░░] ~83% (19 of ~23 total plans)
+Progress: [████████░░] ~87% (20 of ~23 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 19
-- Average duration: ~5.4 min
-- Total execution time: ~1.7 hours
+- Total plans completed: 20
+- Average duration: ~5.3 min
+- Total execution time: ~1.75 hours
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [████████░░] ~83% (19 of ~23 total plans)
 | 02 | 3/3 | 22 min | 7.3 min |
 | 03 | 6/6 | ~30 min | ~5 min |
 | 04 | 2/2 | 8 min | 4 min |
-| 05 | 4/8 | 13 min | 3.3 min |
+| 05 | 5/8 | 16 min | 3.2 min |
 
 **Recent Trend:**
-- Last 5 plans: 5, 2, 5, 3, 3 min
-- Trend: 05-04 Artifact Query Layer completed in 3 min — no deviations, clean execution
+- Last 5 plans: 2, 5, 3, 3, 3 min
+- Trend: 05-05 FTS5 File Operations Search completed in 3 min — one migration fix deviation
 
 *Updated after each plan completion*
 
@@ -94,6 +94,7 @@ Recent decisions affecting current work:
 - [05-02]: file_cmd_regex uses [;&] character class instead of alternation — avoids consuming && separators needed by subsequent matches
 - [05-03]: UPDATE tool_executions matches on tool_use_id alone (not message_uuid) — tool_result arrives in user message while tool_executions row belongs to assistant message
 - [05-04]: lib.rs pub mod artifact_queries co-committed with artifact_queries.rs creation — tests use crate::schema which requires module registration, same pattern as decision [05-02]
+- [05-05]: Fixed migration 003 FTS5 column names from content_col/old_content_col/command_col to content/old_content/command — FTS5 external-content rebuild reads source table columns using FTS column names, so they must match the source table's actual column names
 
 ### Pending Todos
 
@@ -106,5 +107,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-20
-Stopped at: Phase 5, Plan 04 finalized. Wave 3 complete. Wave 4 ready (Plans 05, 06).
-Resume file: /gsd:execute-plan .planning/phases/05-artifact-layer/05-05-PLAN.md
+Stopped at: Phase 5, Plan 05 finalized. Wave 4 in progress. Plan 06 next.
+Resume file: /gsd:execute-plan .planning/phases/05-artifact-layer/05-06-PLAN.md
