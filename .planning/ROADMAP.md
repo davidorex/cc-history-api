@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Core Types and Ingestion Pipeline** - Serde type modeling, JSONL parser, SQLite schema, record decomposer, incremental sync, bulk import
 - [x] **Phase 2: Full-Text Search and CLI** - FTS5 search indexes, CLI interface for querying and exporting session data
-- [ ] **Phase 3: HTTP API and Daemon** - axum HTTP API at /v1/, Unix domain socket, daemon mode with graceful shutdown
+- [x] **Phase 3: HTTP API and Daemon** - axum HTTP API at /v1/, Unix domain socket, daemon mode with graceful shutdown
 - [ ] **Phase 4: Real-Time Ingestion and Events** - File watcher for live JSONL changes, SSE event stream for connected consumers
 - [ ] **Phase 5: Artifact Layer** - File operation tracking, git operation extraction, tool result matching, content reconstruction, artifact API and CLI
 - [ ] **Phase 6: Version Monitoring** - Active Claude Code version detection, schema drift analysis across versions
@@ -74,7 +74,7 @@ Plans:
 - [x] 03-03-PLAN.md — API handlers: analytics, export, schema (6 endpoints) + complete router
 - [x] 03-04-PLAN.md — Dual-listener serve: TCP + Unix domain socket with graceful shutdown
 - [x] 03-05-PLAN.md — HTTP-over-UDS client: DaemonClient and ConnectionMode abstraction
-- [ ] 03-06-PLAN.md — CLI-15: Wire all read-only CLI subcommands through daemon when socket is available
+- [x] 03-06-PLAN.md — CLI-15: Wire all read-only CLI subcommands through daemon when socket is available
 
 ### Phase 4: Real-Time Ingestion and Events
 **Goal**: The daemon automatically ingests new JSONL data as Claude Code writes it, and connected consumers receive events in real time
@@ -131,7 +131,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 |-------|----------------|--------|-----------|
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
 | 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
-| 3. HTTP API and Daemon | 5/6 | In progress | - |
+| 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
 | 5. Artifact Layer | 0/3 | Not started | - |
 | 6. Version Monitoring | 0/1 | Not started | - |
