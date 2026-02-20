@@ -1,0 +1,26 @@
+{
+  "plan_path": ".planning/phases/05-artifact-layer/05-03-PLAN.md",
+  "plan_name": "Tool Result Matching and Retroactive Decomposition",
+  "phase": "05-artifact-layer",
+  "plan_prefix": "05-03",
+  "status": "complete",
+  "tasks": [
+    {
+      "name": "Add tool_result UPDATE to decompose_content_block in decompose.rs",
+      "status": "complete",
+      "commit_hash": "eecd971",
+      "commit_type": "feat",
+      "notes": "Added UPDATE tool_executions SET result_content, is_error WHERE tool_use_id in ToolResult arm. Test verifies round-trip assistant tool_use -> user tool_result matching."
+    },
+    {
+      "name": "Add retroactive artifact decomposition function and integrate into sync_all",
+      "status": "complete",
+      "commit_hash": "6b53955",
+      "commit_type": "feat",
+      "notes": "Added decompose_artifacts_retroactive() querying existing tool_executions for Write/Edit/Read/Bash tools, dispatching to extract_* functions. Integrated into sync_all after FTS rebuild with non-fatal error handling."
+    }
+  ],
+  "decisions": [],
+  "issues_logged": [],
+  "deviations": []
+}
