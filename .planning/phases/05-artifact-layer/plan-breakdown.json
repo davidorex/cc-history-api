@@ -39,12 +39,13 @@
     {
       "plan": "05-03",
       "objective": "Tool result matching (populate tool_executions.result_content) and retroactive artifact decomposition in sync pipeline",
-      "wave": 2,
-      "depends_on": ["05-01"],
+      "wave": 3,
+      "depends_on": ["05-01", "05-02"],
       "requirements": ["ART-04"],
       "files_modified": [
         "crates/store/src/decompose.rs",
-        "crates/store/src/sync.rs"
+        "crates/store/src/sync.rs",
+        "crates/store/src/artifacts.rs"
       ],
       "tasks": [
         { "name": "Add tool_result UPDATE to decompose_content_block for ToolResult variant in decompose.rs", "type": "auto" },
