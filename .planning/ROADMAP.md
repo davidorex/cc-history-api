@@ -48,11 +48,12 @@ Plans:
   2. `claude-history sessions` lists sessions with filters (project, date range, status) and `claude-history stats` shows token usage, tool frequency, and model breakdown
   3. `claude-history export <session-id>` produces valid JSON, Markdown, or CSV output of a complete session conversation
   4. `claude-history query` accepts filter arguments and outputs matching messages as JSON to stdout
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: TBD
-- [ ] 02-02: TBD
+- [ ] 02-01-PLAN.md — FTS5 index + store-layer search and query functions
+- [ ] 02-02-PLAN.md — CLI subcommands: search, sessions, query, stats
+- [ ] 02-03-PLAN.md — CLI subcommands: export, version-check, schema-drift
 
 ### Phase 3: HTTP API and Daemon
 **Goal**: Any language or process can query Claude Code history through a stable HTTP API at localhost:7424 or a Unix domain socket, with the daemon managing its own lifecycle
@@ -125,7 +126,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
-| 2. Full-Text Search and CLI | 0/2 | Not started | - |
+| 2. Full-Text Search and CLI | 0/3 | Not started | - |
 | 3. HTTP API and Daemon | 0/3 | Not started | - |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
 | 5. Artifact Layer | 0/3 | Not started | - |
