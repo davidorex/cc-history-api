@@ -1,0 +1,75 @@
+{
+  "plan": "01-02",
+  "phase": "01-core-types-and-ingestion-pipeline",
+  "status": "complete",
+  "started_at": "2026-02-20T02:37:04Z",
+  "completed_at": "2026-02-20T02:43:26Z",
+  "duration_seconds": 382,
+  "tasks": [
+    {
+      "task": 1,
+      "name": "Implement serde types for all 7 JSONL record types with overflow capture",
+      "status": "complete",
+      "commit": "ce57473",
+      "files_created": [
+        "crates/core/src/record.rs",
+        "crates/core/src/message.rs",
+        "crates/core/src/progress.rs",
+        "crates/core/src/system.rs"
+      ],
+      "files_modified": [
+        "crates/core/src/lib.rs",
+        "crates/core/src/parser.rs"
+      ]
+    },
+    {
+      "task": 2,
+      "name": "Implement streaming JSONL parser with byte-offset tracking and error isolation",
+      "status": "complete",
+      "commit": "7ca4299",
+      "files_created": [],
+      "files_modified": [
+        "crates/core/src/parser.rs",
+        "crates/core/Cargo.toml",
+        "Cargo.lock"
+      ]
+    }
+  ],
+  "deviations": [
+    {
+      "rule": 1,
+      "type": "bug",
+      "description": "sourceToolAssistantUUID field required explicit serde(rename) attribute because rename_all = camelCase transforms source_tool_assistant_uuid to sourceToolAssistantUuid (lowercase 'u' in uuid), but the actual JSON field uses uppercase UUID. Added #[serde(rename = \"sourceToolAssistantUUID\")] to match the empirical data.",
+      "task": 1,
+      "impact": "none — test caught the mismatch immediately, fix was a one-line annotation"
+    }
+  ],
+  "verification": {
+    "cargo_test_all": "pass — 38 tests (28 type deserialization + 10 parser), 0 failures, 0 warnings",
+    "record_type_coverage": "all 7 variants tested (user, assistant, progress, system, queue-operation, summary, file-history-snapshot)",
+    "overflow_capture_verified": "user, assistant, system, progress, usage_stats all tested with unknown fields landing in HashMap",
+    "message_content_dual_form": "string and block-array forms both tested",
+    "content_block_variants": "text, thinking (with/without signature), tool_use (with/without caller), tool_result (string/array content) all tested",
+    "parser_byte_offset_accuracy": "verified across multi-line files with computed expected offsets",
+    "parser_error_isolation": "malformed lines produce warnings, valid records before and after still parsed"
+  },
+  "requirements_addressed": [
+    "CORE-01",
+    "CORE-02",
+    "CORE-03",
+    "CORE-04",
+    "CORE-05",
+    "CORE-06",
+    "CORE-07"
+  ],
+  "test_summary": {
+    "total_tests": 38,
+    "by_module": {
+      "record": 10,
+      "message": 12,
+      "progress": 3,
+      "system": 3,
+      "parser": 10
+    }
+  }
+}

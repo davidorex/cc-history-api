@@ -1,0 +1,73 @@
+{
+  "plan": "01-03",
+  "phase": "01-core-types-and-ingestion-pipeline",
+  "status": "complete",
+  "started_at": "2026-02-20T02:44:47Z",
+  "completed_at": "2026-02-20T02:49:44Z",
+  "duration_seconds": 297,
+  "tasks": [
+    {
+      "task": 1,
+      "name": "Implement decomposition functions for all 7 record types",
+      "status": "complete",
+      "commit": "32fa94b",
+      "files_created": [
+        "crates/store/src/decompose.rs",
+        "crates/store/src/drift.rs"
+      ],
+      "files_modified": [
+        "crates/store/src/lib.rs"
+      ]
+    },
+    {
+      "task": 2,
+      "name": "Implement schema drift logger for overflow fields",
+      "status": "complete",
+      "commit": "32fa94b",
+      "note": "drift.rs was implemented and committed alongside decompose.rs in Task 1 because decompose.rs has a compile-time dependency on drift::log_overflow. All Task 2 verification criteria (4 unit tests + log_record_overflow convenience wrapper test) were satisfied in the same commit.",
+      "files_created": [],
+      "files_modified": []
+    }
+  ],
+  "deviations": [
+    {
+      "rule": 3,
+      "type": "blocking",
+      "description": "drift.rs was necessarily created alongside decompose.rs rather than in a separate Task 2 commit, because decompose.rs imports and calls drift::log_overflow for every record type decomposition. Splitting them into separate commits would have required either a stub/placeholder pattern or a non-compiling intermediate state. Both files were implemented fully in a single commit to maintain compile-and-test-at-every-commit discipline.",
+      "task": 1,
+      "impact": "none — all Task 2 functionality and tests are present and verified; the only difference is commit granularity"
+    }
+  ],
+  "verification": {
+    "cargo_test_store": "pass — 18 tests (12 decompose + 5 drift + 1 db), 0 failures",
+    "cargo_test_workspace": "pass — 56 tests (38 core + 18 store), 0 failures",
+    "record_type_coverage": "all 7 variants tested via dispatcher (user, assistant, progress, system, queue-operation, summary, file-history-snapshot)",
+    "user_decomposition": "sessions + messages + message_content rows verified for both string and block content forms",
+    "assistant_decomposition": "sessions + messages + message_content (text, tool_use, thinking) + tool_executions + token_usage rows verified",
+    "progress_decomposition": "progress_events row with correct data_type extraction verified",
+    "queue_operation_decomposition": "queue_operations row verified",
+    "system_decomposition": "system_events row with subtype, duration_ms, extra_json verified",
+    "summary_decomposition": "summaries row with session_id_from_file verified",
+    "file_history_snapshot": "debug-logged without error, no target table in Phase 1",
+    "idempotency": "INSERT OR IGNORE prevents duplicate rows on re-decomposition, verified",
+    "transaction_usage": "all inserts use &rusqlite::Transaction reference",
+    "drift_logging": "overflow fields logged to schema_drift_log with truncation and UNIQUE deduplication",
+    "drift_qualified_types": "assistant records log 3 qualified types: assistant, assistant.message, assistant.message.usage"
+  },
+  "requirements_addressed": [
+    "DECOMP-01",
+    "DECOMP-02",
+    "DECOMP-03",
+    "DECOMP-04",
+    "DECOMP-05",
+    "DECOMP-06"
+  ],
+  "test_summary": {
+    "total_tests": 18,
+    "by_module": {
+      "decompose": 12,
+      "drift": 5,
+      "db": 1
+    }
+  }
+}
