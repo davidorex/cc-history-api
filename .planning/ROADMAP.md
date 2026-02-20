@@ -13,7 +13,7 @@ claude-history delivers universal queryable access to Claude Code's session hist
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Core Types and Ingestion Pipeline** - Serde type modeling, JSONL parser, SQLite schema, record decomposer, incremental sync, bulk import
-- [ ] **Phase 2: Full-Text Search and CLI** - FTS5 search indexes, CLI interface for querying and exporting session data
+- [x] **Phase 2: Full-Text Search and CLI** - FTS5 search indexes, CLI interface for querying and exporting session data
 - [ ] **Phase 3: HTTP API and Daemon** - axum HTTP API at /v1/, Unix domain socket, daemon mode with graceful shutdown
 - [ ] **Phase 4: Real-Time Ingestion and Events** - File watcher for live JSONL changes, SSE event stream for connected consumers
 - [ ] **Phase 5: Artifact Layer** - File operation tracking, git operation extraction, tool result matching, content reconstruction, artifact API and CLI
@@ -54,7 +54,7 @@ Plans:
 Plans:
 - [x] 02-01-PLAN.md — FTS5 index + store-layer search and query functions
 - [x] 02-02-PLAN.md — CLI subcommands: search, sessions, query, stats
-- [ ] 02-03-PLAN.md — CLI subcommands: export, version-check, schema-drift
+- [x] 02-03-PLAN.md — CLI subcommands: export, version-check, schema-drift
 
 ### Phase 3: HTTP API and Daemon
 **Goal**: Any language or process can query Claude Code history through a stable HTTP API at localhost:7424 or a Unix domain socket, with the daemon managing its own lifecycle
@@ -127,7 +127,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Types and Ingestion Pipeline | 4/4 | Complete | 2026-02-20 |
-| 2. Full-Text Search and CLI | 2/3 | In Progress | - |
+| 2. Full-Text Search and CLI | 3/3 | Complete | 2026-02-20 |
 | 3. HTTP API and Daemon | 0/3 | Not started | - |
 | 4. Real-Time Ingestion and Events | 0/2 | Not started | - |
 | 5. Artifact Layer | 0/3 | Not started | - |
