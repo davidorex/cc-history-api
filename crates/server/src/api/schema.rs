@@ -2,14 +2,20 @@
 //!
 //! Provides 3 handlers for schema-related resources:
 //! - GET /v1/schema — full schema introspection (tables, columns, FKs, views)
-//! - GET /v1/schema/versions — Claude Code version history
-//! - GET /v1/schema/drift — schema drift log entries with optional filters
+//! - GET /v1/schema/versions — Claude Code version history (enhanced timeline
+//!   with session_count and new_fields_count; ?diff=true adds field diffs)
+//! - GET /v1/schema/drift — schema drift entries grouped by version then
+//!   record_type, with promotion status and occurrence counts
+//!
+//! The versions endpoint supports an optional `diff` query parameter. When
+//! `diff=true`, per-version field diffs (new_fields, disappeared_fields) are
+//! included in the response.
 //!
 //! The drift endpoint supports optional `record_type` filtering and a `limit`
-//! parameter. Filtering is applied in Rust after retrieval, matching the
-//! existing CLI pattern from run_schema_drift.
+//! parameter. Drift entries are grouped by version, then by record_type within
+//! each version. Filtering is applied in Rust post-retrieval.
 //!
-//! Requirement IDs: API-15, API-16, M2-P6
+//! Requirement IDs: API-15, API-16, M2-P6, VER-01, VER-02, VER-03
 
 use axum::extract::{Query, State};
 use axum::Json;
@@ -19,7 +25,9 @@ use crate::api::error::ApiError;
 use crate::state::SharedState;
 
 // Re-export store query result types used as JSON response bodies.
-use claude_history_store::query::{DriftEntry, VersionEntry};
+use claude_history_store::query::{
+    VersionDiffEntry, VersionDriftGroup, VersionHistoryEntry,
+};
 
 // ---------------------------------------------------------------------------
 // Schema introspection response structs
@@ -68,6 +76,13 @@ pub struct ForeignKeyInfo {
 // Query parameter structs
 // ---------------------------------------------------------------------------
 
+/// Query parameters for GET /v1/schema/versions.
+#[derive(Debug, Deserialize)]
+pub struct VersionsParams {
+    /// When true, includes per-version field diffs (new fields, disappeared fields).
+    pub diff: Option<bool>,
+}
+
 /// Query parameters for GET /v1/schema/drift.
 #[derive(Debug, Deserialize)]
 pub struct DriftParams {
@@ -77,58 +92,110 @@ pub struct DriftParams {
     pub limit: Option<usize>,
 }
 
+/// Response enum for GET /v1/schema/versions.
+///
+/// Uses `#[serde(untagged)]` so the JSON output is a flat array of either
+/// `VersionHistoryEntry` or `VersionDiffEntry` objects, with no wrapping tag.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum VersionsResponse {
+    /// Default timeline: version history with session_count and new_fields_count.
+    Timeline(Vec<VersionHistoryEntry>),
+    /// Diff view: includes new_fields and disappeared_fields per version.
+    Diff(Vec<VersionDiffEntry>),
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
 /// Handler for GET /v1/schema/versions.
 ///
-/// Returns distinct Claude Code versions observed across all ingested
-/// sessions, with first_seen and last_seen timestamps. Ordered by first
-/// appearance ascending.
+/// Returns Claude Code version history with enhanced metadata. By default,
+/// returns a timeline with session_count and new_fields_count per version.
+/// With `?diff=true`, includes per-version field diffs (new_fields,
+/// disappeared_fields). Ordered by first appearance ascending.
 pub async fn versions(
     State(state): State<SharedState>,
-) -> Result<Json<Vec<VersionEntry>>, ApiError> {
-    let results = state
-        .conn
-        .call(|conn| claude_history_store::query::version_history(conn))
-        .await?;
+    Query(params): Query<VersionsParams>,
+) -> Result<Json<VersionsResponse>, ApiError> {
+    let diff = params.diff.unwrap_or(false);
 
-    Ok(Json(results))
+    if diff {
+        let results = state
+            .conn
+            .call(|conn| claude_history_store::query::version_history_with_diff(conn))
+            .await?;
+        Ok(Json(VersionsResponse::Diff(results)))
+    } else {
+        let results = state
+            .conn
+            .call(|conn| claude_history_store::query::version_history_enhanced(conn))
+            .await?;
+        Ok(Json(VersionsResponse::Timeline(results)))
+    }
 }
 
 /// Handler for GET /v1/schema/drift.
 ///
-/// Returns schema drift log entries ordered by first_seen_at descending.
-/// Supports optional `record_type` filter (applied as substring match in
-/// Rust post-retrieval, matching the CLI pattern) and a `limit` parameter.
+/// Returns schema drift entries grouped by version, then by record_type within
+/// each version. Each field includes occurrence_count, promotion_status, and a
+/// sample_value. Supports optional `record_type` filter (applied in Rust
+/// post-retrieval by filtering each group's record_types) and a `limit`
+/// parameter (applied by counting total fields across all groups).
 pub async fn drift(
     State(state): State<SharedState>,
     Query(params): Query<DriftParams>,
-) -> Result<Json<Vec<DriftEntry>>, ApiError> {
-    let results = state
+) -> Result<Json<Vec<VersionDriftGroup>>, ApiError> {
+    let mut groups = state
         .conn
-        .call(|conn| claude_history_store::query::schema_drift_list(conn))
+        .call(|conn| claude_history_store::query::drift_by_version(conn))
         .await?;
 
-    // Apply record_type filter in Rust, matching CLI pattern from run_schema_drift
-    let filtered: Vec<DriftEntry> = if let Some(ref record_type) = params.record_type {
-        results
-            .into_iter()
-            .filter(|entry| entry.record_type.contains(record_type.as_str()))
-            .collect()
-    } else {
-        results
-    };
+    // Apply record_type filter in Rust post-retrieval: keep only record_types
+    // that match the filter within each version group.
+    if let Some(ref record_type) = params.record_type {
+        for group in &mut groups {
+            group
+                .record_types
+                .retain(|rt| rt.record_type.contains(record_type.as_str()));
+        }
+        // Remove version groups that have no record_types left after filtering.
+        groups.retain(|g| !g.record_types.is_empty());
+    }
 
-    // Apply limit if specified
-    let limited = if let Some(limit) = params.limit {
-        filtered.into_iter().take(limit).collect()
-    } else {
-        filtered
-    };
+    // Apply limit by counting total fields across all groups and truncating
+    // when the limit is reached.
+    if let Some(limit) = params.limit {
+        let mut total_fields = 0usize;
+        let mut truncated_groups = Vec::new();
 
-    Ok(Json(limited))
+        for group in groups {
+            if total_fields >= limit {
+                break;
+            }
+            let mut truncated_rts = Vec::new();
+            for mut rt in group.record_types {
+                if total_fields >= limit {
+                    break;
+                }
+                let remaining = limit - total_fields;
+                if rt.fields.len() > remaining {
+                    rt.fields.truncate(remaining);
+                }
+                total_fields += rt.fields.len();
+                truncated_rts.push(rt);
+            }
+            truncated_groups.push(VersionDriftGroup {
+                version: group.version,
+                record_types: truncated_rts,
+            });
+        }
+
+        groups = truncated_groups;
+    }
+
+    Ok(Json(groups))
 }
 
 /// Handler for GET /v1/schema.
