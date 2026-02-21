@@ -3,13 +3,21 @@
 //! Validates that SQL statements are SELECT-only (no mutations),
 //! then executes with parameter binding and returns JSON rows.
 
+use rusqlite::types::ValueRef;
+use serde_json::Value;
+use std::time::Instant;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SqlPassthroughError {
     #[error("SQL validation failed: {0}")]
     Validation(String),
-    // More variants will be added by P3
+    #[error("SQL execution error: {0}")]
+    Execution(#[from] rusqlite::Error),
+    #[error("Query timeout after {0} seconds")]
+    Timeout(u64),
+    #[error("Parameter type error: {0}")]
+    ParamType(String),
 }
 
 /// Mutating or otherwise unsafe SQL keywords that must not appear at word
@@ -103,6 +111,171 @@ pub fn validate_sql(sql: &str) -> Result<(), SqlPassthroughError> {
     }
 
     Ok(())
+}
+
+/// Timeout in seconds for read-only SQL queries executed via passthrough.
+const QUERY_TIMEOUT_SECS: u64 = 5;
+
+/// Execute a validated read-only SQL statement with JSON parameter binding.
+///
+/// Calls [`validate_sql`] first, then maps each [`serde_json::Value`] param
+/// to a rusqlite-compatible type, executes the query, and returns each result
+/// row as a `serde_json::Map` with column names as keys.
+///
+/// A progress handler interrupts execution after [`QUERY_TIMEOUT_SECS`]
+/// seconds to guard against runaway queries.
+pub fn execute_sql(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: &[Value],
+) -> Result<Vec<serde_json::Map<String, Value>>, SqlPassthroughError> {
+    validate_sql(sql)?;
+
+    // ---- convert JSON params to rusqlite-compatible boxed values -----------
+    let boxed_params = json_params_to_sql(params)?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        boxed_params.iter().map(|b| b.as_ref()).collect();
+
+    // ---- install progress handler for timeout -----------------------------
+    // Use sqlite3_progress_handler via FFI since the rusqlite `hooks` feature
+    // is not enabled. The callback fires approximately every 1000 VM opcodes
+    // and returns non-zero to interrupt the query if the deadline has passed.
+    let start = Instant::now();
+    let deadline_secs = QUERY_TIMEOUT_SECS;
+
+    unsafe {
+        let db_ptr = conn.handle();
+        // Box a closure so we can pass it through the FFI void* context.
+        let callback: Box<Box<dyn FnMut() -> bool>> = Box::new(Box::new(move || {
+            start.elapsed().as_secs() >= deadline_secs
+        }));
+        let ctx = Box::into_raw(callback) as *mut std::ffi::c_void;
+
+        unsafe extern "C" fn handler(ctx: *mut std::ffi::c_void) -> std::ffi::c_int {
+            let cb = &mut *(ctx as *mut Box<dyn FnMut() -> bool>);
+            if cb() { 1 } else { 0 }
+        }
+
+        rusqlite::ffi::sqlite3_progress_handler(db_ptr, 1000, Some(handler), ctx);
+
+        let result = execute_query(conn, sql, &param_refs);
+
+        // Remove the handler and free the closure.
+        rusqlite::ffi::sqlite3_progress_handler(
+            db_ptr,
+            0,
+            None,
+            std::ptr::null_mut(),
+        );
+        drop(Box::from_raw(ctx as *mut Box<dyn FnMut() -> bool>));
+
+        // Map an interrupted error to our Timeout variant.
+        match result {
+            Ok(rows) => Ok(rows),
+            Err(SqlPassthroughError::Execution(ref e))
+                if e.to_string().contains("interrupted") =>
+            {
+                Err(SqlPassthroughError::Timeout(QUERY_TIMEOUT_SECS))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Inner query execution — separated so the progress handler can be
+/// cleaned up regardless of success or failure.
+fn execute_query(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::types::ToSql],
+) -> Result<Vec<serde_json::Map<String, Value>>, SqlPassthroughError> {
+    let mut stmt = conn.prepare(sql)?;
+
+    let col_names: Vec<String> = stmt
+        .column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut rows_out = Vec::new();
+    let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+
+    while let Some(row) = rows.next()? {
+        let mut map = serde_json::Map::new();
+        for (i, name) in col_names.iter().enumerate() {
+            let val = match row.get_ref(i)? {
+                ValueRef::Null => Value::Null,
+                ValueRef::Integer(n) => Value::Number(n.into()),
+                ValueRef::Real(f) => {
+                    serde_json::Number::from_f64(f)
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null)
+                }
+                ValueRef::Text(bytes) => {
+                    let s = String::from_utf8_lossy(bytes);
+                    Value::String(s.into_owned())
+                }
+                ValueRef::Blob(bytes) => {
+                    // Encode blobs as hex strings for JSON safety.
+                    Value::String(hex_encode(bytes))
+                }
+            };
+            map.insert(name.clone(), val);
+        }
+        rows_out.push(map);
+    }
+
+    Ok(rows_out)
+}
+
+/// Convert a slice of JSON values to boxed rusqlite ToSql parameters.
+fn json_params_to_sql(
+    params: &[Value],
+) -> Result<Vec<Box<dyn rusqlite::types::ToSql>>, SqlPassthroughError> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, v)| json_value_to_sql(i, v))
+        .collect()
+}
+
+/// Map a single serde_json::Value to a boxed rusqlite ToSql.
+fn json_value_to_sql(
+    index: usize,
+    value: &Value,
+) -> Result<Box<dyn rusqlite::types::ToSql>, SqlPassthroughError> {
+    match value {
+        Value::Null => Ok(Box::new(rusqlite::types::Null)),
+        Value::Bool(b) => Ok(Box::new(if *b { 1i64 } else { 0i64 })),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Box::new(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Box::new(f))
+            } else {
+                Err(SqlPassthroughError::ParamType(format!(
+                    "parameter {index}: unsupported number value"
+                )))
+            }
+        }
+        Value::String(s) => Ok(Box::new(s.clone())),
+        Value::Array(_) => Err(SqlPassthroughError::ParamType(format!(
+            "parameter {index}: arrays are not supported as SQL parameters"
+        ))),
+        Value::Object(_) => Err(SqlPassthroughError::ParamType(format!(
+            "parameter {index}: objects are not supported as SQL parameters"
+        ))),
+    }
+}
+
+/// Hex-encode a byte slice (lowercase).
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -277,5 +450,110 @@ mod tests {
     fn rejects_semicolon_before_comment() {
         // "SELECT 1; -- comment" has a semicolon before a comment — reject for safety.
         assert!(validate_sql("SELECT 1; -- comment").is_err());
+    }
+
+    // ---- execute_sql tests ------------------------------------------------
+
+    /// Helper: create an in-memory SQLite connection for execute_sql tests.
+    fn mem_conn() -> rusqlite::Connection {
+        rusqlite::Connection::open_in_memory().expect("open in-memory db")
+    }
+
+    #[test]
+    fn test_execute_simple_select() {
+        let conn = mem_conn();
+        let rows = execute_sql(&conn, "SELECT 1 AS val", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["val"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn test_execute_with_params() {
+        let conn = mem_conn();
+        let rows = execute_sql(
+            &conn,
+            "SELECT ?1 AS x",
+            &[Value::String("hello".into())],
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["x"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn test_execute_with_null_param() {
+        let conn = mem_conn();
+        let rows = execute_sql(&conn, "SELECT ?1 AS n", &[Value::Null]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["n"], Value::Null);
+    }
+
+    #[test]
+    fn test_execute_integer_mapping() {
+        let conn = mem_conn();
+        let rows = execute_sql(&conn, "SELECT 42 AS num", &[]).unwrap();
+        assert_eq!(rows[0]["num"], serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_execute_text_mapping() {
+        let conn = mem_conn();
+        let rows = execute_sql(&conn, "SELECT 'abc' AS t", &[]).unwrap();
+        assert_eq!(rows[0]["t"], serde_json::json!("abc"));
+    }
+
+    #[test]
+    fn test_execute_null_mapping() {
+        let conn = mem_conn();
+        let rows = execute_sql(&conn, "SELECT NULL AS n", &[]).unwrap();
+        assert_eq!(rows[0]["n"], Value::Null);
+    }
+
+    #[test]
+    fn test_execute_rejects_mutation() {
+        let conn = mem_conn();
+        conn.execute_batch("CREATE TABLE t (id INTEGER)").unwrap();
+        let err = execute_sql(&conn, "INSERT INTO t VALUES (1)", &[]);
+        assert!(err.is_err());
+        match err.unwrap_err() {
+            SqlPassthroughError::Validation(_) => {}
+            other => panic!("expected Validation error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_invalid_sql() {
+        let conn = mem_conn();
+        let err = execute_sql(&conn, "SELECT * FROM nonexistent_table", &[]);
+        assert!(err.is_err());
+        match err.unwrap_err() {
+            SqlPassthroughError::Execution(_) => {}
+            other => panic!("expected Execution error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_multiple_rows() {
+        let conn = mem_conn();
+        conn.execute_batch(
+            "CREATE TABLE nums (v INTEGER);
+             INSERT INTO nums VALUES (1);
+             INSERT INTO nums VALUES (2);
+             INSERT INTO nums VALUES (3);",
+        )
+        .unwrap();
+        let rows = execute_sql(&conn, "SELECT v FROM nums ORDER BY v", &[]).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["v"], serde_json::json!(1));
+        assert_eq!(rows[1]["v"], serde_json::json!(2));
+        assert_eq!(rows[2]["v"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn test_execute_empty_result() {
+        let conn = mem_conn();
+        conn.execute_batch("CREATE TABLE empty_t (id INTEGER)").unwrap();
+        let rows = execute_sql(&conn, "SELECT id FROM empty_t", &[]).unwrap();
+        assert!(rows.is_empty());
     }
 }
