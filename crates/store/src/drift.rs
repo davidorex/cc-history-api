@@ -5,10 +5,11 @@
 //! format. This module logs each unique (field_name, record_type, version)
 //! combination to the `schema_drift_log` table with a truncated sample value.
 //!
-//! The UNIQUE(field_name, record_type, version) constraint in the DDL means
-//! each combination is logged only once — subsequent occurrences are silently
-//! ignored via INSERT OR IGNORE. This keeps the drift log compact while still
-//! capturing first-seen evidence of every new field.
+//! The UNIQUE(field_name, record_type, version) constraint in the DDL combined
+//! with INSERT ... ON CONFLICT DO UPDATE enables occurrence counting: each
+//! re-observation increments `occurrence_count` and refreshes `last_seen_at`.
+//! This keeps the drift log compact (one row per unique combination) while
+//! also tracking frequency of each overflow field.
 //!
 //! [DECOMP-05, STORE-04]
 
@@ -26,9 +27,13 @@ const MAX_SAMPLE_VALUE_LEN: usize = 500;
 /// For each (field_name, value) pair in the overflow map:
 /// - Serializes the value to a string
 /// - Truncates to MAX_SAMPLE_VALUE_LEN characters
-/// - Inserts via INSERT OR IGNORE (UNIQUE constraint deduplicates)
+/// - Inserts via INSERT ... ON CONFLICT DO UPDATE, which increments
+///   `occurrence_count` and refreshes `last_seen_at` on re-observation
 ///
-/// Returns the number of *new* drift entries logged (0 if all were duplicates).
+/// Returns the number of fields observed (both new inserts and re-observations).
+/// This count includes updates to existing rows, since ON CONFLICT DO UPDATE
+/// returns 1 for both inserts and updates. The return value is used for
+/// SchemaDrift SSE event emission and debug logging.
 pub fn log_overflow(
     version: &str,
     record_type: &str,
@@ -55,9 +60,12 @@ pub fn log_overflow(
         );
 
         let changed = tx.execute(
-            "INSERT OR IGNORE INTO schema_drift_log
-             (field_name, record_type, version, sample_value, source_context)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO schema_drift_log
+             (field_name, record_type, version, sample_value, source_context, occurrence_count, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'))
+             ON CONFLICT(field_name, record_type, version) DO UPDATE SET
+               occurrence_count = schema_drift_log.occurrence_count + 1,
+               last_seen_at = datetime('now')",
             rusqlite::params![field_name, record_type, version, truncated, source_context],
         )?;
 
@@ -66,7 +74,7 @@ pub fn log_overflow(
                 field_name = field_name,
                 record_type = record_type,
                 version = version,
-                "New schema drift field discovered"
+                "Schema drift field observed"
             );
             new_entries += changed;
         }
@@ -77,7 +85,7 @@ pub fn log_overflow(
             count = new_entries,
             record_type = record_type,
             version = version,
-            "Logged {} new schema drift field(s)",
+            "Observed {} schema drift field(s)",
             new_entries
         );
     }
@@ -219,7 +227,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 2: Same fields logged again -> no new rows (UNIQUE constraint)
+    // Test 2: Same fields logged again -> occurrence_count increments,
+    //         row count stays at 1 (ON CONFLICT DO UPDATE)
     // -----------------------------------------------------------------------
     #[test]
     fn test_log_overflow_idempotent() {
@@ -248,11 +257,12 @@ mod tests {
             .unwrap();
 
         // Second call with same field_name + record_type + version
+        // ON CONFLICT DO UPDATE returns 1 (update counts as a change)
         {
             let tx = conn.unchecked_transaction().unwrap();
             let logged = log_overflow("2.1.49", "assistant", &overflow, &tx).unwrap();
             tx.commit().unwrap();
-            assert_eq!(logged, 0, "Duplicate should not create new rows");
+            assert_eq!(logged, 1, "ON CONFLICT DO UPDATE returns 1 for the updated row");
         }
 
         let count_after: i64 = conn
@@ -262,7 +272,78 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count_before, count_after, "Row count should be unchanged");
+        assert_eq!(count_before, count_after, "Row count should be unchanged — update, not insert");
+
+        // Verify occurrence_count is 2 after second observation
+        let occurrence_count: i64 = conn
+            .query_row(
+                "SELECT occurrence_count FROM schema_drift_log WHERE field_name = 'repeatedField'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(occurrence_count, 2, "occurrence_count should be 2 after two observations");
+
+        // Verify last_seen_at is populated
+        let last_seen: String = conn
+            .query_row(
+                "SELECT last_seen_at FROM schema_drift_log WHERE field_name = 'repeatedField'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!last_seen.is_empty(), "last_seen_at should be populated");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2b: Occurrence count tracks multiple re-observations correctly
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_log_overflow_occurrence_count() {
+        let conn = setup_db();
+
+        let mut overflow = HashMap::new();
+        overflow.insert(
+            "trackedField".to_string(),
+            serde_json::json!("value"),
+        );
+
+        // Insert twice
+        for _ in 0..2 {
+            let tx = conn.unchecked_transaction().unwrap();
+            log_overflow("2.1.50", "user", &overflow, &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Verify occurrence_count = 2
+        let occurrence_count: i64 = conn
+            .query_row(
+                "SELECT occurrence_count FROM schema_drift_log WHERE field_name = 'trackedField' AND version = '2.1.50'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(occurrence_count, 2, "occurrence_count should be 2 after two observations");
+
+        // Verify last_seen_at is not NULL
+        let last_seen: Option<String> = conn
+            .query_row(
+                "SELECT last_seen_at FROM schema_drift_log WHERE field_name = 'trackedField' AND version = '2.1.50'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(last_seen.is_some(), "last_seen_at should not be NULL");
+
+        // Verify only one row exists (not two)
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_drift_log WHERE field_name = 'trackedField' AND version = '2.1.50'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 1, "Should have exactly one row despite two observations");
     }
 
     // -----------------------------------------------------------------------
