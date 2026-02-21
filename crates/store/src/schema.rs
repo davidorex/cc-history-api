@@ -13,6 +13,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("002", include_str!("../migrations/002_fts5.sql")),
     ("003", include_str!("../migrations/003_artifacts.sql")),
     ("004", include_str!("../migrations/004_modeling.sql")),
+    ("005", include_str!("../migrations/005_drop_noise.sql")),
 ];
 
 /// Errors that can occur during migration application.
@@ -37,6 +38,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), SchemaError> {
         );"
     )?;
 
+    let mut needs_vacuum = false;
+
     for (version, sql) in MIGRATIONS {
         let already_applied: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM schema_versions WHERE version = ?1",
@@ -53,9 +56,21 @@ pub fn run_migrations(conn: &Connection) -> Result<(), SchemaError> {
             )?;
             tx.commit()?;
             tracing::info!(version = *version, "Applied migration");
+
+            // Migration 005 drops large tables — VACUUM to reclaim disk space.
+            // VACUUM cannot run inside a transaction, so we defer it.
+            if *version == "005" {
+                needs_vacuum = true;
+            }
         } else {
             tracing::debug!(version = *version, "Migration already applied, skipping");
         }
+    }
+
+    if needs_vacuum {
+        tracing::info!("Running VACUUM to reclaim space from dropped tables");
+        conn.execute_batch("VACUUM;")?;
+        tracing::info!("VACUUM complete");
     }
 
     Ok(())

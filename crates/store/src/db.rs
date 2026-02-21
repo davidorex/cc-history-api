@@ -150,8 +150,6 @@ mod tests {
                 "token_usage",
                 "tool_executions",
                 "agents",
-                "queue_operations",
-                "progress_events",
                 "system_events",
                 "summaries",
                 "sync_metadata",
@@ -168,11 +166,12 @@ mod tests {
                 );
             }
 
-            // Confirm we have at least 13 tables (schema_versions is created
-            // by run_migrations bootstrap, the rest by 001_initial.sql)
+            // Confirm we have at least 11 tables (schema_versions is created
+            // by run_migrations bootstrap, the rest by migrations 001-005.
+            // Migration 005 drops progress_events and queue_operations.)
             assert!(
-                tables.len() >= 13,
-                "Expected at least 13 tables, found {}: {:?}",
+                tables.len() >= 11,
+                "Expected at least 11 tables, found {}: {:?}",
                 tables.len(),
                 tables
             );
@@ -195,11 +194,8 @@ mod tests {
                 "idx_message_content_message_uuid",
                 "idx_tool_executions_message_uuid",
                 "idx_tool_executions_tool_name",
-                "idx_progress_events_session_id",
-                "idx_progress_events_data_type",
                 "idx_system_events_session_id",
                 "idx_system_events_subtype",
-                "idx_queue_operations_session_id",
             ];
 
             for idx in &expected_indexes {
@@ -224,7 +220,7 @@ mod tests {
             let count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
                 .expect("should count schema_versions");
-            assert_eq!(count, 4, "Should still have exactly 4 migration versions (001+002+003+004) after second init");
+            assert_eq!(count, 5, "Should still have exactly 5 migration versions (001-005) after second init");
             Ok::<(), rusqlite::Error>(())
         })
         .await
