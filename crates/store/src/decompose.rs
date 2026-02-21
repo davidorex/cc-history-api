@@ -68,6 +68,22 @@ pub fn decompose_record(
         }
     };
 
+    // Upsert the project row for full-base record types that carry a cwd.
+    // QueueOperation, Summary, and FileHistorySnapshot lack a RecordBase,
+    // so they are skipped.
+    let maybe_base = match record {
+        JSONLRecord::User(r) => Some(&r.base),
+        JSONLRecord::Assistant(r) => Some(&r.base),
+        JSONLRecord::Progress(r) => Some(&r.base),
+        JSONLRecord::System(r) => Some(&r.base),
+        _ => None,
+    };
+    if let Some(base) = maybe_base {
+        if !base.cwd.is_empty() {
+            result.rows_inserted += upsert_project(base, tx)?;
+        }
+    }
+
     // Second pass: artifact extraction from tool_use blocks.
     // Runs in same transaction for atomicity. Produces file_operations
     // and git_operations rows from Write/Edit/Read/Bash tool inputs.
@@ -76,6 +92,24 @@ pub fn decompose_record(
         crate::artifacts::decompose_artifacts(record, session_id_from_file, tx)?;
 
     Ok(result)
+}
+
+/// Upsert a project row from a full-base record's RecordBase.
+///
+/// Uses INSERT ... ON CONFLICT to create or update the projects row.
+/// display_name is derived from the last path component. session_count is
+/// recomputed from sessions on each conflict to stay accurate.
+/// Only called when base.cwd is non-empty (has a project_path).
+fn upsert_project(base: &RecordBase, tx: &Transaction) -> Result<usize, rusqlite::Error> {
+    let display_name = base.cwd.split('/').last().unwrap_or("");
+    tx.execute(
+        "INSERT INTO projects (project_path, display_name, first_seen, last_seen, session_count)
+         VALUES (?1, ?2, ?3, ?3, 1)
+         ON CONFLICT(project_path) DO UPDATE SET
+           last_seen = MAX(projects.last_seen, excluded.last_seen),
+           session_count = (SELECT COUNT(DISTINCT session_id) FROM sessions WHERE project_path = ?1)",
+        rusqlite::params![base.cwd, display_name, base.timestamp],
+    )
 }
 
 /// Upsert a session row from a full-base record's RecordBase.
@@ -1441,5 +1475,112 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&extra_json).unwrap();
         assert_eq!(parsed["hookCount"], 3);
         assert!(parsed["hookInfos"].is_array());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: upsert_project creates a projects row during decompose_record
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_record_creates_project() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let record = JSONLRecord::User(UserRecord {
+            base: test_base("user-proj", "sess-proj"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("test".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow: HashMap::new(),
+        });
+
+        decompose_record(&record, "sess-proj", &tx).unwrap();
+        tx.commit().unwrap();
+
+        // Verify projects row was created
+        let display_name: String = conn
+            .query_row(
+                "SELECT display_name FROM projects WHERE project_path = '/home/user/project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(display_name, "project");
+
+        let session_count: i64 = conn
+            .query_row(
+                "SELECT session_count FROM projects WHERE project_path = '/home/user/project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_count, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: upsert_project updates session_count for same project_path
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_record_updates_project_session_count() {
+        let conn = setup_db();
+
+        // First session
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let record = JSONLRecord::User(UserRecord {
+                base: test_base("user-p1", "sess-p1"),
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: MessageContent::Text("first".to_string()),
+                },
+                source_tool_assistant_uuid: None,
+                tool_use_result: None,
+                thinking_metadata: None,
+                todos: None,
+                permission_mode: None,
+                overflow: HashMap::new(),
+            });
+            decompose_record(&record, "sess-p1", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Second session with same project_path but different session_id
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut base2 = test_base("user-p2", "sess-p2");
+            // cwd is the same "/home/user/project" from test_base
+            base2.cwd = "/home/user/project".to_string();
+
+            let record = JSONLRecord::User(UserRecord {
+                base: base2,
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: MessageContent::Text("second".to_string()),
+                },
+                source_tool_assistant_uuid: None,
+                tool_use_result: None,
+                thinking_metadata: None,
+                todos: None,
+                permission_mode: None,
+                overflow: HashMap::new(),
+            });
+            decompose_record(&record, "sess-p2", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Verify session_count is now 2
+        let session_count: i64 = conn
+            .query_row(
+                "SELECT session_count FROM projects WHERE project_path = '/home/user/project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_count, 2, "session_count should reflect both sessions");
     }
 }
