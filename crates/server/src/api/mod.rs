@@ -1,10 +1,10 @@
 //! API module — HTTP handler types, error conversion, and route construction.
 //!
 //! Exposes endpoint handlers organized by resource (health, sessions, messages,
-//! search, analytics, export, schema, files, git, artifacts, events) and a
-//! `build_router` function that assembles all 28 routes into an axum Router
-//! with shared application state and TraceLayer middleware for request/response
-//! logging.
+//! search, analytics, export, schema, projects, sql, files, git, artifacts,
+//! events) and a `build_router` function that assembles all 32 routes into an
+//! axum Router with shared application state and TraceLayer middleware for
+//! request/response logging.
 
 pub mod analytics;
 pub mod artifacts_api;
@@ -29,7 +29,7 @@ use crate::state::SharedState;
 
 /// Build the axum Router with all API routes and shared state.
 ///
-/// Registers 28 endpoints across 11 resource groups with TraceLayer
+/// Registers 32 endpoints across 14 resource groups with TraceLayer
 /// middleware for structured request/response logging:
 ///
 /// **Health:**
@@ -59,8 +59,16 @@ use crate::state::SharedState;
 ///   - GET /v1/export/{session_id}
 ///
 /// **Schema:**
+///   - GET /v1/schema
 ///   - GET /v1/schema/versions
 ///   - GET /v1/schema/drift
+///
+/// **Projects:** [M2-P7, M2-P8]
+///   - GET /v1/projects
+///   - GET /v1/projects/{path}
+///
+/// **SQL Passthrough:** [M2-P5, M2-P8]
+///   - POST /v1/sql
 ///
 /// **Files:** [API-17 through API-22]
 ///   - GET  /v1/files
@@ -106,9 +114,15 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/analytics/models", get(analytics::models))
         // Export
         .route("/v1/export/{session_id}", get(export_api::handler))
-        // Schema
+        // Schema (enhanced)
+        .route("/v1/schema", get(schema::schema_full))
         .route("/v1/schema/versions", get(schema::versions))
         .route("/v1/schema/drift", get(schema::drift))
+        // Projects [M2-P7, M2-P8]
+        .route("/v1/projects", get(projects::list))
+        .route("/v1/projects/{path}", get(projects::detail))
+        // SQL passthrough [M2-P5, M2-P8]
+        .route("/v1/sql", post(sql::execute))
         // Files [API-17 through API-22]
         // IMPORTANT: /v1/files/search and /v1/files/query MUST be registered
         // BEFORE /v1/files/{file_id} to avoid path parameter capturing
