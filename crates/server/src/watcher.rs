@@ -4,7 +4,8 @@
 //! watching with per-file debounce, an async processing loop that triggers
 //! `sync_file` for each changed .jsonl file, and emits all seven SSE event types
 //! (record:added, session:started, schema:drift, version:changed, file:written,
-//! file:edited, git:commit) through the broadcast channel.
+//! file:edited, git:commit) through the broadcast channel. Version changes are
+//! also persisted to the version_history table for historical tracking.
 //!
 //! Architecture:
 //! - `spawn_watcher` creates a blocking std::thread with the notify watcher
@@ -407,7 +408,31 @@ async fn check_version_change(
                     new = %new_version,
                     "Claude Code version change detected"
                 );
-                state.last_known_version = Some(new_version);
+                state.last_known_version = Some(new_version.clone());
+
+                // Persist version change to version_history table.
+                // This happens AFTER SSE event emission so a DB failure
+                // does not prevent event delivery.
+                let ver = new_version.clone();
+                let sid = session_id.to_string();
+                let persist_result = conn.call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO version_history (version, first_seen_at, last_seen_at, session_id, session_count)
+                         VALUES (?1, datetime('now'), datetime('now'), ?2, 1)
+                         ON CONFLICT(version) DO UPDATE SET
+                           last_seen_at = datetime('now'),
+                           session_count = version_history.session_count + 1",
+                        rusqlite::params![ver, sid],
+                    )
+                }).await;
+
+                if let Err(e) = persist_result {
+                    tracing::warn!(
+                        error = %e,
+                        version = %new_version,
+                        "Failed to persist version change to version_history table — SSE event was still emitted"
+                    );
+                }
             }
         }
         Ok(None) => {
@@ -476,6 +501,30 @@ pub async fn watcher_loop(
         data_ingested_since_fts_rebuild: false,
         last_fts_rebuild: Instant::now(),
     };
+
+    // Backfill version_history from sessions table on startup.
+    // This aims to ensure version_history is populated even if the migration's
+    // backfill ran on an empty database (first-time setup).
+    let backfill_result = conn.call(|conn| {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO version_history (version, first_seen_at, last_seen_at, session_id, session_count)
+             SELECT
+                 version,
+                 MIN(first_seen_at),
+                 MAX(COALESCE(last_seen_at, first_seen_at)),
+                 (SELECT s2.session_id FROM sessions s2 WHERE s2.version = sessions.version
+                  ORDER BY s2.first_seen_at ASC LIMIT 1),
+                 COUNT(*)
+             FROM sessions
+             WHERE version IS NOT NULL AND version != ''
+             GROUP BY version"
+        )
+    }).await;
+
+    match backfill_result {
+        Ok(()) => tracing::info!("version_history backfill completed on startup"),
+        Err(e) => tracing::warn!(error = %e, "version_history backfill failed on startup — will be populated incrementally"),
+    }
 
     // Counter for periodic debouncer pruning (every ~100 events).
     let mut event_count: u64 = 0;
