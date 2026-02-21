@@ -12,6 +12,8 @@
 //! Requirement IDs: CLI-03, CLI-04, CLI-06, CLI-07, CLI-08, CLI-09,
 //!                  API-03, API-04, API-05, API-06, API-07, API-09
 
+use std::collections::{BTreeMap, HashSet};
+
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -211,6 +213,57 @@ pub struct ProjectDetail {
     pub git_operations: i64,
     pub first_activity: Option<String>,
     pub last_activity: Option<String>,
+}
+
+/// Enhanced version history entry from the version_history table.
+/// Includes session_count and new_fields_count for richer timeline display.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VersionHistoryEntry {
+    pub version: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub session_id: Option<String>,
+    pub session_count: i64,
+    pub new_fields_count: i64,
+}
+
+/// A drift field with occurrence count and promotion status.
+/// Promotion status is computed dynamically from schema introspection.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DriftFieldEntry {
+    pub field_name: String,
+    pub record_type: String,
+    pub sample_value: Option<String>,
+    pub occurrence_count: i64,
+    pub first_seen_at: String,
+    pub promotion_status: String,
+}
+
+/// Drift entries grouped by version, then by record type within each version.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VersionDriftGroup {
+    pub version: String,
+    pub record_types: Vec<RecordTypeDriftGroup>,
+}
+
+/// Drift entries for a specific record type within a version.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecordTypeDriftGroup {
+    pub record_type: String,
+    pub fields: Vec<DriftFieldEntry>,
+}
+
+/// Version diff entry showing fields introduced or disappeared in a version.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VersionDiffEntry {
+    pub version: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub session_id: Option<String>,
+    pub session_count: i64,
+    pub new_fields_count: i64,
+    pub new_fields: Vec<String>,
+    pub disappeared_fields: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1159,6 +1212,268 @@ pub fn get_project(
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Version monitoring query functions (Plan 06-03)
+// ---------------------------------------------------------------------------
+
+/// Enhanced version history from the version_history table.
+///
+/// [VER-01] Returns all versions ordered by first_seen_at ascending,
+/// including session_count and new_fields_count for timeline display.
+/// This complements the older `version_history()` function which queries
+/// messages directly — this one reads from the dedicated version_history table.
+pub fn version_history_enhanced(
+    conn: &Connection,
+) -> Result<Vec<VersionHistoryEntry>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT version, first_seen_at, last_seen_at, session_id, session_count, new_fields_count
+         FROM version_history
+         ORDER BY first_seen_at ASC",
+    )?;
+
+    let results = stmt.query_map([], |row| {
+        Ok(VersionHistoryEntry {
+            version: row.get(0)?,
+            first_seen_at: row.get(1)?,
+            last_seen_at: row.get(2)?,
+            session_id: row.get(3)?,
+            session_count: row.get(4)?,
+            new_fields_count: row.get(5)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// Version history with diff analysis: for each version, shows which drift
+/// fields first appeared ("new_fields") and which disappeared compared to
+/// the previous version.
+///
+/// [VER-01] new_fields are drift fields whose first_seen_at in schema_drift_log
+/// is attributed to this version. disappeared_fields are drift fields present
+/// in the immediately preceding version but absent in this one.
+pub fn version_history_with_diff(
+    conn: &Connection,
+) -> Result<Vec<VersionDiffEntry>, rusqlite::Error> {
+    // Load all versions in chronological order
+    let versions = version_history_enhanced(conn)?;
+
+    // Load all drift entries grouped by version
+    let mut stmt = conn.prepare(
+        "SELECT field_name, record_type, version
+         FROM schema_drift_log
+         WHERE version IS NOT NULL
+         ORDER BY version, field_name",
+    )?;
+
+    // Build a map: version -> set of "field_name:record_type" keys
+    let mut version_fields: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (field_name, record_type, version) = row?;
+        version_fields
+            .entry(version)
+            .or_default()
+            .insert(format!("{}:{}", field_name, record_type));
+    }
+
+    let mut result = Vec::with_capacity(versions.len());
+    let mut prev_fields: Option<&HashSet<String>> = None;
+
+    for v in &versions {
+        let current_fields = version_fields.get(&v.version);
+        let empty = HashSet::new();
+        let current = current_fields.unwrap_or(&empty);
+
+        // new_fields: in current but not in any earlier version's drift entries
+        // (approximated by checking the immediately preceding version)
+        let new_fields: Vec<String> = if let Some(prev) = prev_fields {
+            current
+                .iter()
+                .filter(|f| !prev.contains(*f))
+                .cloned()
+                .collect()
+        } else {
+            // First version: all fields are "new"
+            current.iter().cloned().collect()
+        };
+
+        // disappeared_fields: in previous version but not in current
+        let disappeared_fields: Vec<String> = if let Some(prev) = prev_fields {
+            prev.iter()
+                .filter(|f| !current.contains(*f))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        result.push(VersionDiffEntry {
+            version: v.version.clone(),
+            first_seen_at: v.first_seen_at.clone(),
+            last_seen_at: v.last_seen_at.clone(),
+            session_id: v.session_id.clone(),
+            session_count: v.session_count,
+            new_fields_count: v.new_fields_count,
+            new_fields,
+            disappeared_fields,
+        });
+
+        prev_fields = current_fields;
+    }
+
+    Ok(result)
+}
+
+/// Map a drift record_type to its target database table name.
+///
+/// Returns None for record types that have no corresponding table
+/// (e.g., "file-history-snapshot").
+fn record_type_to_table(record_type: &str) -> Option<&'static str> {
+    match record_type {
+        "user" | "assistant" | "assistant.message" | "progress" => Some("messages"),
+        "assistant.message.usage" => Some("token_usage"),
+        "system" => Some("system_events"),
+        "summary" => Some("summaries"),
+        "queue-operation" => None, // Dropped in migration 005
+        "file-history-snapshot" => None, // No target table
+        _ => None,
+    }
+}
+
+/// Build a HashSet of column names for a given table using PRAGMA table_info.
+///
+/// Returns an empty set if the table does not exist or the pragma fails.
+fn table_columns(conn: &Connection, table_name: &str) -> HashSet<String> {
+    let mut columns = HashSet::new();
+    // PRAGMA table_info cannot use parameterized queries, but table_name
+    // comes from our own record_type_to_table mapping (not user input).
+    let sql = format!("PRAGMA table_info({})", table_name);
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
+            for col in rows.flatten() {
+                columns.insert(col);
+            }
+        }
+    }
+    columns
+}
+
+/// Drift entries grouped by version then record_type, with dynamic promotion status.
+///
+/// [VER-04] For each drift field, determines promotion_status by checking whether
+/// the field_name matches an actual column on the target table:
+/// - "promoted" if the field matches a real column
+/// - "extra_json" if the target table has an extra_json column (overflow is captured)
+/// - "unhandled" if neither condition applies or no target table exists
+///
+/// sample_value is truncated to 200 characters per CONTEXT decision.
+pub fn drift_by_version(
+    conn: &Connection,
+) -> Result<Vec<VersionDriftGroup>, rusqlite::Error> {
+    // Build column maps for all relevant tables (computed once, not per-field)
+    let table_names = ["messages", "token_usage", "system_events", "summaries"];
+    let mut table_column_cache: BTreeMap<&str, HashSet<String>> = BTreeMap::new();
+    for table in &table_names {
+        table_column_cache.insert(table, table_columns(conn, table));
+    }
+
+    // Query all drift entries with occurrence_count
+    let mut stmt = conn.prepare(
+        "SELECT field_name, record_type, version, sample_value,
+                COALESCE(occurrence_count, 1) as occurrence_count,
+                first_seen_at
+         FROM schema_drift_log
+         WHERE version IS NOT NULL
+         ORDER BY version ASC, record_type ASC, field_name ASC",
+    )?;
+
+    // Intermediate: version -> record_type -> Vec<DriftFieldEntry>
+    let mut groups: BTreeMap<String, BTreeMap<String, Vec<DriftFieldEntry>>> = BTreeMap::new();
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (field_name, record_type, version, sample_value, occurrence_count, first_seen_at) = row?;
+
+        // Truncate sample_value to 200 chars
+        let sample_value = sample_value.map(|s| {
+            if s.len() > 200 {
+                format!("{}...", &s[..200])
+            } else {
+                s
+            }
+        });
+
+        // Compute promotion_status dynamically
+        let promotion_status = match record_type_to_table(&record_type) {
+            Some(table) => {
+                let cols = table_column_cache.get(table).cloned().unwrap_or_default();
+                if cols.contains(&field_name) {
+                    "promoted".to_string()
+                } else if cols.contains("extra_json") {
+                    "extra_json".to_string()
+                } else {
+                    "unhandled".to_string()
+                }
+            }
+            None => "unhandled".to_string(),
+        };
+
+        let entry = DriftFieldEntry {
+            field_name,
+            record_type: record_type.clone(),
+            sample_value,
+            occurrence_count,
+            first_seen_at,
+            promotion_status,
+        };
+
+        groups
+            .entry(version)
+            .or_default()
+            .entry(record_type)
+            .or_default()
+            .push(entry);
+    }
+
+    // Convert BTreeMap structure to Vec<VersionDriftGroup>
+    let result = groups
+        .into_iter()
+        .map(|(version, rt_map)| {
+            let record_types = rt_map
+                .into_iter()
+                .map(|(record_type, fields)| RecordTypeDriftGroup {
+                    record_type,
+                    fields,
+                })
+                .collect();
+            VersionDriftGroup {
+                version,
+                record_types,
+            }
+        })
+        .collect();
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1241,5 +1556,130 @@ mod tests {
         let conn = setup_db();
         let detail = get_project(&conn, "/nonexistent/path").unwrap();
         assert!(detail.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Version monitoring query tests (Plan 06-03)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_version_history_enhanced() {
+        let conn = setup_db();
+
+        // Insert version_history entries directly
+        conn.execute(
+            "INSERT INTO version_history (version, first_seen_at, last_seen_at, session_id, session_count, new_fields_count)
+             VALUES ('1.0.0', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 'sess-1', 3, 2)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO version_history (version, first_seen_at, last_seen_at, session_id, session_count, new_fields_count)
+             VALUES ('1.1.0', '2026-01-03T00:00:00Z', '2026-01-04T00:00:00Z', 'sess-2', 5, 1)",
+            [],
+        ).unwrap();
+
+        let entries = version_history_enhanced(&conn).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].version, "1.0.0");
+        assert_eq!(entries[0].session_count, 3);
+        assert_eq!(entries[0].new_fields_count, 2);
+        assert_eq!(entries[1].version, "1.1.0");
+        assert_eq!(entries[1].session_count, 5);
+        assert_eq!(entries[1].new_fields_count, 1);
+    }
+
+    #[test]
+    fn test_drift_by_version_grouping() {
+        let conn = setup_db();
+
+        // Insert drift entries for two versions
+        conn.execute(
+            "INSERT INTO schema_drift_log (field_name, record_type, version, sample_value, first_seen_at, occurrence_count, last_seen_at)
+             VALUES ('new_field_a', 'user', '1.0.0', 'sample_a', '2026-01-01T00:00:00Z', 3, '2026-01-02T00:00:00Z')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO schema_drift_log (field_name, record_type, version, sample_value, first_seen_at, occurrence_count, last_seen_at)
+             VALUES ('new_field_b', 'assistant', '1.0.0', 'sample_b', '2026-01-01T00:00:00Z', 1, '2026-01-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO schema_drift_log (field_name, record_type, version, sample_value, first_seen_at, occurrence_count, last_seen_at)
+             VALUES ('new_field_c', 'user', '1.1.0', 'sample_c', '2026-01-03T00:00:00Z', 2, '2026-01-04T00:00:00Z')",
+            [],
+        ).unwrap();
+
+        let groups = drift_by_version(&conn).unwrap();
+        assert_eq!(groups.len(), 2, "Should have 2 version groups");
+
+        // Version 1.0.0 should have 2 record_type groups: "assistant" and "user"
+        let v1 = &groups[0];
+        assert_eq!(v1.version, "1.0.0");
+        assert_eq!(v1.record_types.len(), 2);
+        // BTreeMap ordering: "assistant" before "user"
+        assert_eq!(v1.record_types[0].record_type, "assistant");
+        assert_eq!(v1.record_types[0].fields.len(), 1);
+        assert_eq!(v1.record_types[1].record_type, "user");
+        assert_eq!(v1.record_types[1].fields.len(), 1);
+
+        // Version 1.1.0 should have 1 record_type group: "user"
+        let v2 = &groups[1];
+        assert_eq!(v2.version, "1.1.0");
+        assert_eq!(v2.record_types.len(), 1);
+        assert_eq!(v2.record_types[0].record_type, "user");
+        assert_eq!(v2.record_types[0].fields[0].occurrence_count, 2);
+    }
+
+    #[test]
+    fn test_drift_promotion_status() {
+        let conn = setup_db();
+
+        // Insert a drift field named "is_compact_summary" for record_type "user".
+        // Since "user" maps to the "messages" table, and messages has a real column
+        // named "is_compact_summary" (added in migration 006), this should get
+        // promotion_status "promoted".
+        conn.execute(
+            "INSERT INTO schema_drift_log (field_name, record_type, version, sample_value, first_seen_at, occurrence_count, last_seen_at)
+             VALUES ('is_compact_summary', 'user', '1.0.0', '1', '2026-01-01T00:00:00Z', 5, '2026-01-05T00:00:00Z')",
+            [],
+        ).unwrap();
+
+        // Insert a drift field with a name that does NOT match any messages column.
+        // Messages has extra_json, so this should get "extra_json" status.
+        conn.execute(
+            "INSERT INTO schema_drift_log (field_name, record_type, version, sample_value, first_seen_at, occurrence_count, last_seen_at)
+             VALUES ('unknown_exotic_field', 'user', '1.0.0', 'exotic', '2026-01-01T00:00:00Z', 1, '2026-01-01T00:00:00Z')",
+            [],
+        ).unwrap();
+
+        // Insert a drift field for a record_type with no target table.
+        // Should get "unhandled" status.
+        conn.execute(
+            "INSERT INTO schema_drift_log (field_name, record_type, version, sample_value, first_seen_at, occurrence_count, last_seen_at)
+             VALUES ('some_field', 'file-history-snapshot', '1.0.0', 'val', '2026-01-01T00:00:00Z', 1, '2026-01-01T00:00:00Z')",
+            [],
+        ).unwrap();
+
+        let groups = drift_by_version(&conn).unwrap();
+        assert_eq!(groups.len(), 1);
+
+        let v = &groups[0];
+        assert_eq!(v.version, "1.0.0");
+
+        // Find the file-history-snapshot group
+        let fhs_group = v.record_types.iter().find(|rt| rt.record_type == "file-history-snapshot").unwrap();
+        assert_eq!(fhs_group.fields[0].promotion_status, "unhandled");
+
+        // Find the user group
+        let user_group = v.record_types.iter().find(|rt| rt.record_type == "user").unwrap();
+        assert_eq!(user_group.fields.len(), 2);
+
+        // Find is_compact_summary -> should be "promoted"
+        let promoted = user_group.fields.iter().find(|f| f.field_name == "is_compact_summary").unwrap();
+        assert_eq!(promoted.promotion_status, "promoted");
+
+        // Find unknown_exotic_field -> should be "extra_json"
+        let extra = user_group.fields.iter().find(|f| f.field_name == "unknown_exotic_field").unwrap();
+        assert_eq!(extra.promotion_status, "extra_json");
     }
 }
