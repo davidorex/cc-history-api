@@ -10,17 +10,17 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 6 of 6 (Version Monitoring) -- IN PROGRESS
-Plan: 2 of 4 in current phase
-Status: Plan 06-02 (decomposer updates) complete. Plans 06-03 and 06-04 remain.
-Last activity: 2026-02-21 -- Completed 06-02-PLAN.md (decomposer overflow extraction and drift occurrence tracking)
+Plan: 3 of 4 in current phase
+Status: Plan 06-03 (watcher persistence + query functions) complete. Plan 06-04 remains.
+Last activity: 2026-02-21 -- Completed 06-03-PLAN.md (watcher version persistence and enhanced query functions)
 
-Progress: [████████████] ~93% (25 of ~27 total plans)
+Progress: [█████████████] ~96% (26 of ~27 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 25
-- Average duration: ~4.5 min
+- Total plans completed: 26
+- Average duration: ~4.4 min
 - Total execution time: ~1.9 hours
 
 **By Phase:**
@@ -34,8 +34,8 @@ Progress: [████████████] ~93% (25 of ~27 total plans)
 | 05 | 8/8 | 25 min | 3.1 min |
 
 **Recent Trend:**
-- Last 5 plans: 3, 3, 3, 2, 3 min
-- Trend: 06-02 Decomposer overflow extraction completed in 3 min — 0 deviations
+- Last 5 plans: 3, 3, 2, 3, 4 min
+- Trend: 06-03 Watcher persistence + query functions completed in 4 min — 0 deviations
 
 *Updated after each plan completion*
 
@@ -102,6 +102,9 @@ Recent decisions affecting current work:
 - [06-02]: drift.rs return value semantic change: log_overflow now returns count of both inserts and updates (ON CONFLICT DO UPDATE returns 1 for each affected row) — acceptable since return value used only for SSE events and debug logging
 - [06-02]: decompose_user drift logging uses ORIGINAL overflow (including promoted keys) — drift detection tracks what Claude Code sends, not what gets promoted to columns
 - [06-02]: decompose_assistant merges record-level and message-level overflow into single extra_json — avoids two separate JSON columns
+- [06-03]: Version persistence happens AFTER SSE event emission — DB failure does not prevent event delivery
+- [06-03]: Promotion status computed dynamically via PRAGMA table_info cached per query invocation — avoids stale static mappings
+- [06-03]: record_type_to_table mapping covers 9 drift record_types: user/assistant/assistant.message/progress -> messages, assistant.message.usage -> token_usage, system -> system_events, summary -> summaries, queue-operation/file-history-snapshot -> None
 
 ### Pending Todos
 
@@ -114,5 +117,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-21
-Stopped at: Plan 06-02 complete. Plans 06-03 and 06-04 remain for execution.
-Resume file: .planning/phases/06-version-monitoring/06-03-PLAN.md
+Stopped at: Plan 06-03 complete. Plan 06-04 remains for execution.
+Resume file: .planning/phases/06-version-monitoring/06-04-PLAN.md
