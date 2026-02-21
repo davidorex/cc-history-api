@@ -14,6 +14,7 @@ pub mod files;
 pub mod git;
 pub mod health;
 pub mod messages;
+pub mod projects;
 pub mod schema;
 pub mod search;
 pub mod sessions;
