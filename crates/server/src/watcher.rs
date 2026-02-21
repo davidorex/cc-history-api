@@ -135,11 +135,15 @@ pub fn spawn_watcher(
     std::thread::spawn(move || {
         let event_tx = tx;
         let mut watcher = match notify::recommended_watcher(move |result| {
-            // blocking_send is used because this callback runs on a non-async
-            // thread (the OS filesystem event thread). The `let _ =` prefix
-            // intentionally discards errors — if the channel is closed or full,
-            // the event is lost (acceptable: the watcher loop has shut down).
-            let _ = event_tx.blocking_send(result);
+            // try_send is used because this callback runs on the OS filesystem
+            // event thread (FSEvents on macOS). Using blocking_send here would
+            // stall the FSEvents callback thread when the channel is full,
+            // causing macOS to coalesce subsequent events into directory-level
+            // notifications that silently fail the .jsonl extension filter.
+            // try_send returns immediately, preventing FSEvents thread stalling.
+            if let Err(e) = event_tx.try_send(result) {
+                tracing::warn!("Watcher channel full or closed, event dropped: {}", e);
+            }
         }) {
             Ok(w) => w,
             Err(e) => {

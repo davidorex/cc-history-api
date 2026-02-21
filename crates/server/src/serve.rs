@@ -79,9 +79,10 @@ pub async fn run_server(
 
     // --- File watcher for live JSONL ingestion ---
     // Create an mpsc channel for the notify watcher to send filesystem events
-    // to the async watcher_loop. Buffer of 256 allows burst tolerance without
-    // excessive memory use.
-    let (watch_tx, watch_rx) = tokio::sync::mpsc::channel(256);
+    // to the async watcher_loop. Buffer of 4096 provides headroom during burst
+    // ingestion — a full channel causes try_send to drop events (logged as
+    // warnings) rather than stalling the FSEvents callback thread.
+    let (watch_tx, watch_rx) = tokio::sync::mpsc::channel(4096);
 
     // Spawn the notify watcher on a blocking thread. If the projects_dir does
     // not exist yet (Claude Code may not have created sessions), this will
@@ -111,6 +112,38 @@ pub async fn run_server(
                  The daemon will still serve API requests from existing data."
             );
         }
+    }
+
+    // --- Initial sync to catch up on files the watcher may have missed ---
+    // The watcher only sees events from the point it starts. Any JSONL files
+    // created or modified before the watcher was established (or missed due to
+    // FSEvents coalescing) need to be caught up via a full directory walk.
+    // sync_all is incremental — files already fully ingested are skipped via
+    // sync_metadata offset tracking, so this is safe to run unconditionally.
+    {
+        let sync_conn = state.conn.clone();
+        let sync_dir = projects_dir.clone();
+        tokio::spawn(async move {
+            match claude_history_store::sync::sync_all(&sync_conn, &sync_dir).await {
+                Ok(result) => {
+                    tracing::info!(
+                        files_discovered = result.files_discovered,
+                        files_synced = result.files_synced,
+                        files_skipped = result.files_skipped,
+                        files_errored = result.files_errored,
+                        total_records = result.total_records,
+                        "Startup sync completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Startup sync failed — existing data still available, \
+                         live watcher will handle new changes"
+                    );
+                }
+            }
+        });
     }
 
     // --- TCP listener ---
