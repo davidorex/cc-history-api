@@ -1,0 +1,179 @@
+{
+  "phase": "06-version-monitoring",
+  "phase_number": "06",
+  "goal": "The daemon actively tracks Claude Code version changes and provides actionable schema drift analysis across versions",
+  "must_haves": {
+    "truths": [
+      "claude-history version-check shows version history with timestamps, session counts, and new_fields_count",
+      "GET /v1/schema/versions returns version timeline with optional diff=true for per-version field diffs",
+      "GET /v1/schema/drift returns overflow fields grouped by version then record type with promotion status and occurrence counts",
+      "Version changes detected during ingestion are persisted to version_history table and fire SseEvent::VersionChanged",
+      "Compact summary messages are classified via is_compact_summary column and excluded from analytical views by default",
+      "All 7 analytical views filter out compact summary messages for accurate counts"
+    ],
+    "artifacts": [
+      {
+        "path": "crates/store/migrations/006_version_monitoring.sql",
+        "provides": "version_history table, messages columns (is_compact_summary, source_tool_use_id, extra_json), schema_drift_log occurrence_count column, 7 recreated views"
+      },
+      {
+        "path": "crates/store/src/schema.rs",
+        "provides": "Migration 006 in MIGRATIONS array"
+      },
+      {
+        "path": "crates/store/src/decompose.rs",
+        "provides": "Compact summary field extraction, extra_json population on messages"
+      },
+      {
+        "path": "crates/store/src/drift.rs",
+        "provides": "INSERT ON CONFLICT with occurrence_count increment"
+      },
+      {
+        "path": "crates/store/src/query.rs",
+        "provides": "Enhanced version_history_enhanced(), drift_by_version(), drift promotion status"
+      },
+      {
+        "path": "crates/server/src/watcher.rs",
+        "provides": "Version persistence to version_history table on version change"
+      },
+      {
+        "path": "crates/server/src/api/schema.rs",
+        "provides": "Enhanced versions and drift handlers with grouping and promotion status"
+      },
+      {
+        "path": "crates/server/src/main.rs",
+        "provides": "Enhanced run_version_check and run_schema_drift with richer output"
+      }
+    ],
+    "key_links": [
+      {
+        "from": "crates/server/src/watcher.rs",
+        "to": "version_history table",
+        "via": "INSERT ON CONFLICT in check_version_change",
+        "pattern": "INSERT INTO version_history"
+      },
+      {
+        "from": "crates/store/src/decompose.rs",
+        "to": "messages.is_compact_summary",
+        "via": "overflow.remove(isCompactSummary) in decompose_user",
+        "pattern": "is_compact_summary"
+      },
+      {
+        "from": "crates/server/src/api/schema.rs",
+        "to": "crates/store/src/query.rs",
+        "via": "version_history_enhanced and drift_by_version query functions",
+        "pattern": "version_history_enhanced|drift_by_version"
+      }
+    ]
+  },
+  "plans": [
+    {
+      "id": "06-01",
+      "name": "Migration 006: version_history table, messages columns, drift enhancement, view recreation",
+      "type": "execute",
+      "wave": 1,
+      "depends_on": [],
+      "requirements": ["VER-02"],
+      "files_modified": [
+        "crates/store/migrations/006_version_monitoring.sql",
+        "crates/store/src/schema.rs"
+      ],
+      "tasks": [
+        {
+          "name": "Create migration 006 SQL",
+          "type": "auto",
+          "description": "version_history table, messages ALTER TABLE (is_compact_summary, source_tool_use_id, extra_json), schema_drift_log ALTER TABLE (occurrence_count, last_seen_at), backfills, and 7 view recreations with is_compact_summary filtering"
+        },
+        {
+          "name": "Register migration 006 in schema.rs and add tests",
+          "type": "auto",
+          "description": "Add 006 to MIGRATIONS array, add tests for version_history table existence, messages columns, view queryability"
+        }
+      ]
+    },
+    {
+      "id": "06-02",
+      "name": "Decomposer compact summary extraction and drift occurrence tracking",
+      "type": "execute",
+      "wave": 2,
+      "depends_on": ["06-01"],
+      "requirements": ["VER-03"],
+      "files_modified": [
+        "crates/store/src/decompose.rs",
+        "crates/store/src/drift.rs"
+      ],
+      "tasks": [
+        {
+          "name": "Update drift.rs log_overflow to track occurrence counts",
+          "type": "auto",
+          "description": "Change INSERT OR IGNORE to INSERT ON CONFLICT DO UPDATE SET occurrence_count = occurrence_count + 1, last_seen_at = datetime('now')"
+        },
+        {
+          "name": "Update decompose_user and decompose_assistant for compact summary fields and extra_json",
+          "type": "auto",
+          "description": "Extract isCompactSummary, sourceToolUseID from overflow HashMap, populate is_compact_summary and source_tool_use_id columns, serialize remaining overflow to extra_json on messages"
+        }
+      ]
+    },
+    {
+      "id": "06-03",
+      "name": "Watcher version persistence and enhanced query layer",
+      "type": "execute",
+      "wave": 3,
+      "depends_on": ["06-01"],
+      "requirements": ["VER-01", "VER-04"],
+      "files_modified": [
+        "crates/server/src/watcher.rs",
+        "crates/store/src/query.rs"
+      ],
+      "tasks": [
+        {
+          "name": "Add version_history persistence to check_version_change in watcher.rs",
+          "type": "auto",
+          "description": "After SSE event emission, INSERT INTO version_history ON CONFLICT DO UPDATE for real-time persistence. Also backfill on startup from sessions table."
+        },
+        {
+          "name": "Add enhanced query functions: version_history_enhanced, drift_by_version, promotion status",
+          "type": "auto",
+          "description": "New query functions reading from version_history table with session_count and new_fields_count, drift grouped by version then record_type with dynamic promotion status computation"
+        }
+      ]
+    },
+    {
+      "id": "06-04",
+      "name": "API handlers and CLI enhancement for version monitoring",
+      "type": "execute",
+      "wave": 4,
+      "depends_on": ["06-02", "06-03"],
+      "requirements": ["VER-01", "VER-02", "VER-03"],
+      "files_modified": [
+        "crates/server/src/api/schema.rs",
+        "crates/server/src/main.rs",
+        "crates/server/src/output.rs"
+      ],
+      "tasks": [
+        {
+          "name": "Enhance /v1/schema/versions and /v1/schema/drift API handlers",
+          "type": "auto",
+          "description": "Update versions handler to use version_history_enhanced with optional ?diff=true. Update drift handler to use drift_by_version with promotion status grouping."
+        },
+        {
+          "name": "Enhance run_version_check and run_schema_drift CLI output",
+          "type": "auto",
+          "description": "Version-check output adds session_count and new_fields_count columns. Schema-drift output adds promotion status and occurrence count. Both direct and daemon modes."
+        }
+      ]
+    }
+  ],
+  "requirement_coverage": {
+    "VER-01": ["06-03", "06-04"],
+    "VER-02": ["06-01", "06-04"],
+    "VER-03": ["06-02", "06-04"],
+    "VER-04": ["06-03"]
+  },
+  "spec_constraint_coverage": {
+    "SC-1: version-check + GET /v1/schema/versions shows version history with timestamps": ["06-01", "06-03", "06-04"],
+    "SC-2: GET /v1/schema/drift shows overflow fields grouped by version with new fields highlighted": ["06-02", "06-03", "06-04"],
+    "SC-3: Periodic check loop detects version changes and logs to schema_versions (= version_history)": ["06-03"]
+  }
+}

@@ -121,10 +121,13 @@ Plans:
   1. `claude-history version-check` (and GET /v1/schema/versions) shows the detected Claude Code version and a history of version changes with timestamps
   2. GET /v1/schema/drift shows overflow fields grouped by version, highlighting new fields that appeared when Claude Code updated
   3. In daemon mode, a periodic check loop detects version changes and logs them to schema_versions without requiring a restart
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 06-01: TBD
+- [ ] 06-01-PLAN.md — Migration 006: version_history table, messages columns, drift enhancement, view recreation
+- [ ] 06-02-PLAN.md — Decomposer compact summary extraction and drift occurrence tracking
+- [ ] 06-03-PLAN.md — Watcher version persistence and enhanced query layer
+- [ ] 06-04-PLAN.md — API handlers and CLI enhancement for version monitoring
 
 ## Progress
 
@@ -139,4 +142,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
 | 5. Artifact Layer | 8/8 | Complete | 2026-02-20 |
-| 6. Version Monitoring | 0/1 | Not started | - |
+| 6. Version Monitoring | 0/4 | Not started | - |
