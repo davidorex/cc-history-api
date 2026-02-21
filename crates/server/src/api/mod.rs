@@ -17,6 +17,7 @@ pub mod messages;
 pub mod schema;
 pub mod search;
 pub mod sessions;
+pub mod sql;
 
 use axum::routing::{get, post};
 use axum::Router;
