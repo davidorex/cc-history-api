@@ -378,6 +378,17 @@ fn insert_token_usage(
 // ---------------------------------------------------------------------------
 
 /// Decompose a user record into sessions + messages + message_content rows.
+///
+/// After inserting the base message row, extracts known overflow fields
+/// (isCompactSummary, sourceToolUseID) into promoted columns on messages,
+/// and serializes any remaining overflow keys into extra_json. Promoted
+/// keys are excluded from extra_json to avoid duplication.
+///
+/// The UPDATE runs after INSERT OR IGNORE, so re-syncs can backfill these
+/// newly-promoted fields on existing rows.
+///
+/// Drift logging uses the ORIGINAL r.overflow (including promoted keys)
+/// because drift detection tracks what Claude Code sends, not what we promote.
 /// [DECOMP-01]
 fn decompose_user(
     r: &UserRecord,
@@ -394,10 +405,37 @@ fn decompose_user(
     // 3. Decompose message content (string or blocks)
     result.rows_inserted += decompose_message_content(&r.base.uuid, &r.message.content, tx)?;
 
-    // 4. Upsert agent if present
+    // 4. Extract promoted overflow fields and populate extra_json
+    let is_compact = r.overflow.get("isCompactSummary")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let source_tool_id = r.overflow.get("sourceToolUseID")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Build extra_json from remaining overflow (excluding promoted keys)
+    let mut remaining = r.overflow.clone();
+    remaining.remove("isCompactSummary");
+    remaining.remove("sourceToolUseID");
+    let extra_json = if remaining.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&remaining)?)
+    };
+
+    // UPDATE the message row with extracted values. This runs after INSERT OR
+    // IGNORE so re-sync can backfill promoted fields on existing rows.
+    tx.execute(
+        "UPDATE messages SET is_compact_summary = ?1, source_tool_use_id = ?2, extra_json = ?3
+         WHERE uuid = ?4",
+        rusqlite::params![is_compact as i32, source_tool_id, extra_json, r.base.uuid],
+    )?;
+
+    // 5. Upsert agent if present
     result.rows_inserted += upsert_agent(&r.base, tx)?;
 
-    // 5. Log overflow for drift detection
+    // 6. Log overflow for drift detection (uses ORIGINAL overflow including
+    // promoted keys — drift tracks what Claude Code sends)
     result.overflow_fields += drift::log_overflow(
         &r.base.version,
         "user",
@@ -410,6 +448,11 @@ fn decompose_user(
 
 /// Decompose an assistant record into sessions + messages + message_content
 /// + token_usage + tool_executions rows.
+///
+/// After inserting the base message row, merges record-level overflow and
+/// message-level overflow into a single extra_json on the messages row.
+/// Compact summary fields (isCompactSummary, sourceToolUseID) appear on
+/// USER records, not assistant records, so only extra_json is relevant here.
 /// [DECOMP-02]
 fn decompose_assistant(
     r: &AssistantRecord,
@@ -449,10 +492,43 @@ fn decompose_assistant(
         )?;
     }
 
-    // 5. Upsert agent if present
+    // 5. Build extra_json from record-level and message-level overflow
+    let msg_extra = if r.message.overflow.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&r.message.overflow)?)
+    };
+
+    let record_extra = if r.overflow.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&r.overflow)?)
+    };
+
+    // Merge both overflow sources into a single extra_json
+    let combined_extra = match (record_extra, msg_extra) {
+        (Some(r_json), Some(m_json)) => {
+            let mut r_map: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&r_json)?;
+            let m_map: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&m_json)?;
+            r_map.extend(m_map);
+            Some(serde_json::to_string(&r_map)?)
+        }
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (None, None) => None,
+    };
+
+    // UPDATE the message row with extra_json
+    tx.execute(
+        "UPDATE messages SET extra_json = ?1 WHERE uuid = ?2",
+        rusqlite::params![combined_extra, r.base.uuid],
+    )?;
+
+    // 6. Upsert agent if present
     result.rows_inserted += upsert_agent(&r.base, tx)?;
 
-    // 6. Log overflow from both AssistantRecord and AssistantMessage levels
+    // 7. Log overflow from both AssistantRecord and AssistantMessage levels
     result.overflow_fields += drift::log_overflow(
         &r.base.version,
         "assistant",
@@ -1536,5 +1612,225 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session_count, 2, "session_count should reflect both sessions");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15: User record with isCompactSummary and sourceToolUseID in
+    //          overflow -> promoted columns populated on messages row
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_compact_summary() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let mut overflow = HashMap::new();
+        overflow.insert(
+            "isCompactSummary".to_string(),
+            serde_json::json!(true),
+        );
+        overflow.insert(
+            "sourceToolUseID".to_string(),
+            serde_json::json!("tool_123"),
+        );
+
+        let record = UserRecord {
+            base: test_base("user-compact", "sess-compact"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("Compact summary content".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow,
+        };
+
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        // Verify is_compact_summary = 1
+        let is_compact: i64 = conn
+            .query_row(
+                "SELECT is_compact_summary FROM messages WHERE uuid = 'user-compact'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_compact, 1, "is_compact_summary should be 1 for compact summary records");
+
+        // Verify source_tool_use_id = "tool_123"
+        let source_tool_id: String = conn
+            .query_row(
+                "SELECT source_tool_use_id FROM messages WHERE uuid = 'user-compact'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_tool_id, "tool_123");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: User record with promoted fields + unknown overflow field ->
+    //          extra_json contains unknown field but NOT promoted keys
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_extra_json() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let mut overflow = HashMap::new();
+        overflow.insert(
+            "isCompactSummary".to_string(),
+            serde_json::json!(true),
+        );
+        overflow.insert(
+            "sourceToolUseID".to_string(),
+            serde_json::json!("tool_456"),
+        );
+        overflow.insert(
+            "unknownField".to_string(),
+            serde_json::json!("mysterious value"),
+        );
+
+        let record = UserRecord {
+            base: test_base("user-extra", "sess-extra-json"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("test".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow,
+        };
+
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        // Verify extra_json contains unknownField
+        let extra_json: String = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'user-extra'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&extra_json).unwrap();
+        assert_eq!(parsed["unknownField"], "mysterious value");
+
+        // Verify promoted keys are NOT in extra_json
+        assert!(
+            parsed.get("isCompactSummary").is_none(),
+            "isCompactSummary should NOT be in extra_json"
+        );
+        assert!(
+            parsed.get("sourceToolUseID").is_none(),
+            "sourceToolUseID should NOT be in extra_json"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17: User record with no compact summary fields in overflow ->
+    //          is_compact_summary = 0 and extra_json IS NULL
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_no_compact_summary() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let record = UserRecord {
+            base: test_base("user-nocompact", "sess-nocompact"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("normal message".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow: HashMap::new(),
+        };
+
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        // Verify is_compact_summary = 0
+        let is_compact: i64 = conn
+            .query_row(
+                "SELECT is_compact_summary FROM messages WHERE uuid = 'user-nocompact'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_compact, 0, "is_compact_summary should be 0 for normal messages");
+
+        // Verify extra_json IS NULL
+        let extra_json: Option<String> = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'user-nocompact'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(extra_json.is_none(), "extra_json should be NULL when overflow is empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 18: Assistant record with overflow -> extra_json populated from
+    //          merged record-level and message-level overflow
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_assistant_extra_json() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let mut record_overflow = HashMap::new();
+        record_overflow.insert("apiError".to_string(), serde_json::json!("timeout"));
+
+        let mut message_overflow = HashMap::new();
+        message_overflow.insert(
+            "context_management".to_string(),
+            serde_json::json!({"strategy": "truncate"}),
+        );
+
+        let record = AssistantRecord {
+            base: test_base("assist-extra", "sess-assist-extra"),
+            message: AssistantMessage {
+                id: "msg_extra".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "Response".to_string(),
+                }],
+                stop_reason: Some("end_turn".to_string()),
+                stop_sequence: None,
+                usage: None,
+                overflow: message_overflow,
+            },
+            request_id: None,
+            is_api_error_message: None,
+            error: None,
+            overflow: record_overflow,
+        };
+
+        decompose_assistant(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        // Verify extra_json merges both overflow sources
+        let extra_json: String = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'assist-extra'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&extra_json).unwrap();
+        assert_eq!(parsed["apiError"], "timeout");
+        assert!(parsed["context_management"].is_object());
     }
 }
