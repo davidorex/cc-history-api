@@ -14,6 +14,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("003", include_str!("../migrations/003_artifacts.sql")),
     ("004", include_str!("../migrations/004_modeling.sql")),
     ("005", include_str!("../migrations/005_drop_noise.sql")),
+    ("006", include_str!("../migrations/006_version_monitoring.sql")),
 ];
 
 /// Errors that can occur during migration application.
@@ -182,5 +183,94 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "migration 004 should be recorded exactly once");
+    }
+
+    #[test]
+    fn migration_006_creates_version_history_table() {
+        let conn = migrated_conn();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'version_history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "version_history table should exist after migration 006");
+    }
+
+    #[test]
+    fn migration_006_adds_messages_columns() {
+        let conn = migrated_conn();
+        conn.execute_batch(
+            "SELECT is_compact_summary, source_tool_use_id, extra_json FROM messages LIMIT 0",
+        )
+        .expect("messages should have is_compact_summary, source_tool_use_id, extra_json columns");
+    }
+
+    #[test]
+    fn migration_006_adds_schema_drift_log_columns() {
+        let conn = migrated_conn();
+        conn.execute_batch(
+            "SELECT occurrence_count, last_seen_at FROM schema_drift_log LIMIT 0",
+        )
+        .expect("schema_drift_log should have occurrence_count and last_seen_at columns");
+    }
+
+    #[test]
+    fn migration_006_views_are_queryable() {
+        let conn = migrated_conn();
+        let views = [
+            "v_file_token_cost",
+            "v_file_conversation_context",
+            "v_project_summary",
+            "v_file_provenance",
+            "v_git_commit_context",
+            "v_tool_errors",
+            "v_session_cost",
+        ];
+
+        for view_name in &views {
+            conn.execute_batch(&format!("SELECT * FROM {view_name} LIMIT 0"))
+                .unwrap_or_else(|e| {
+                    panic!("view {view_name} should be queryable after migration 006: {e}")
+                });
+        }
+    }
+
+    #[test]
+    fn migration_006_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Verify migration 006 is recorded exactly once in schema_versions
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = '006'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "migration 006 should be recorded exactly once");
+    }
+
+    #[test]
+    fn migration_006_version_history_not_schema_versions() {
+        let conn = migrated_conn();
+        // version_history should be independently queryable and not conflict
+        // with the schema_versions migration tracker table
+        let vh_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM version_history", [], |row| row.get(0))
+            .unwrap();
+        let sv_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
+            .unwrap();
+        // version_history is empty on a fresh in-memory DB (no sessions to backfill from)
+        assert_eq!(vh_count, 0, "version_history should be empty on fresh DB");
+        // schema_versions should have 6 entries (one per migration)
+        assert_eq!(
+            sv_count, 6,
+            "schema_versions should track all 6 applied migrations"
+        );
     }
 }
