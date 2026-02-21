@@ -175,5 +175,17 @@
     "SC-1: version-check + GET /v1/schema/versions shows version history with timestamps": ["06-01", "06-03", "06-04"],
     "SC-2: GET /v1/schema/drift shows overflow fields grouped by version with new fields highlighted": ["06-02", "06-03", "06-04"],
     "SC-3: Periodic check loop detects version changes and logs to schema_versions (= version_history)": ["06-03"]
-  }
+  },
+  "patterns": [
+    {"id": "PAT-009", "name": "Normalized table design", "description": "13+ normalized tables with clear separation of concerns", "affected_files": ["crates/store/migrations/006_version_monitoring.sql"]},
+    {"id": "PAT-010", "name": "Embedded migrations via include_str!", "description": "MIGRATIONS const array with include_str! macro", "affected_files": ["crates/store/src/schema.rs"]},
+    {"id": "PAT-012", "name": "INSERT OR IGNORE idempotency", "description": "Idempotent decomposition with INSERT OR IGNORE or INSERT ON CONFLICT", "affected_files": ["crates/store/src/decompose.rs", "crates/store/src/drift.rs"]},
+    {"id": "PAT-013", "name": "5-step decompose pattern", "description": "upsert session, insert message, decompose content, upsert agent, log overflow", "affected_files": ["crates/store/src/decompose.rs"]},
+    {"id": "PAT-015", "name": "Schema drift logging", "description": "log_overflow with qualified record_type names and UNIQUE deduplication", "affected_files": ["crates/store/src/drift.rs"]},
+    {"id": "PAT-019", "name": "Per-crate error types via thiserror", "description": "Crate-specific error enums", "affected_files": ["crates/store/src/query.rs"]},
+    {"id": "PAT-020", "name": "clap derive-based CLI", "description": "Subcommand enum with async runtime", "affected_files": ["crates/server/src/main.rs"]},
+    {"id": "PAT-022", "name": "Inline cfg(test) modules", "description": "Tests as inline modules with helper functions", "affected_files": ["crates/store/src/schema.rs", "crates/store/src/drift.rs", "crates/store/src/decompose.rs"]},
+    {"id": "PAT-032", "name": "Index naming convention idx_{table}_{column}", "description": "Consistent index naming", "affected_files": ["crates/store/migrations/006_version_monitoring.sql"]}
+  ],
+  "anti_patterns": []
 }

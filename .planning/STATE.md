@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 5 - Artifact Layer -- COMPLETE. Phase 6 next.
+**Current focus:** Phase 6 - Version Monitoring -- PLANNED
 
 ## Current Position
 
-Phase: 5 of 6 (Artifact Layer) -- COMPLETE
-Plan: 8 of 8 complete in current phase
-Status: Plan 05-08 (SSE Artifact Events and FTS File Operations Rebuild) finalized. Phase 5 complete. Phase 6 next.
-Last activity: 2026-02-20 -- Completed 05-08 (3 new SseEvent variants, artifact event emission in watcher, FTS file_operations rebuild)
+Phase: 6 of 6 (Version Monitoring) -- PLANNED
+Plan: 0 of 4 in current phase
+Status: Phase 6 planned with 4 plans across 4 waves (8 tasks total). Ready for execution.
+Last activity: 2026-02-21 -- Phase 6 planning complete (4 plans: migration, decomposer, watcher+queries, API+CLI)
 
-Progress: [██████████] ~96% (23 of ~24 total plans)
+Progress: [██████████] ~85% (23 of ~27 total plans)
 
 ## Performance Metrics
 
@@ -107,5 +107,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-21
-Stopped at: Phase 6 context gathered. Ready for planning.
-Resume file: .planning/phases/06-version-monitoring/06-CONTEXT.md
+Stopped at: Phase 6 planning complete. 4 plans ready for execution.
+Resume file: .planning/phases/06-version-monitoring/plan-breakdown.json
