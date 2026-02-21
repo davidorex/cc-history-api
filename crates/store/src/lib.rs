@@ -6,4 +6,5 @@ pub mod drift;
 pub mod fts;
 pub mod query;
 pub mod schema;
+pub mod sql_passthrough;
 pub mod sync;

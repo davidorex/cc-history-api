@@ -189,6 +189,30 @@ pub struct ExportTokenUsage {
     pub cache_read_input_tokens: Option<i64>,
 }
 
+/// A project row from the projects table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectEntry {
+    pub project_path: String,
+    pub display_name: Option<String>,
+    pub session_count: i64,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+/// Detailed project information from the v_project_summary view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDetail {
+    pub project_path: String,
+    pub display_name: Option<String>,
+    pub session_count: i64,
+    pub message_count: i64,
+    pub total_tokens: i64,
+    pub file_operations: i64,
+    pub git_operations: i64,
+    pub first_activity: Option<String>,
+    pub last_activity: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Query functions
 // ---------------------------------------------------------------------------
@@ -1066,4 +1090,156 @@ pub fn token_stats_by_day(conn: &Connection) -> Result<Vec<TokenStats>, rusqlite
     })?;
 
     results.collect()
+}
+
+/// List all projects, ordered by session_count descending.
+///
+/// [M2-P4] Reads from the projects table populated by migration 004.
+pub fn list_projects(conn: &Connection, limit: usize) -> Result<Vec<ProjectEntry>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT project_path, display_name, session_count, first_seen, last_seen
+         FROM projects
+         ORDER BY session_count DESC
+         LIMIT ?1",
+    )?;
+
+    let results = stmt.query_map(rusqlite::params![limit as i64], |row| {
+        Ok(ProjectEntry {
+            project_path: row.get(0)?,
+            display_name: row.get(1)?,
+            session_count: row.get(2)?,
+            first_seen: row.get(3)?,
+            last_seen: row.get(4)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// Get detailed project information from the v_project_summary view.
+///
+/// [M2-P4] Joins with the projects table for display_name. Returns None
+/// if the project_path does not exist in v_project_summary.
+pub fn get_project(
+    conn: &Connection,
+    project_path: &str,
+) -> Result<Option<ProjectDetail>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            vs.project_path,
+            p.display_name,
+            vs.session_count,
+            vs.message_count,
+            vs.total_tokens,
+            vs.file_operations,
+            vs.git_operations,
+            vs.first_activity,
+            vs.last_activity
+         FROM v_project_summary vs
+         LEFT JOIN projects p ON p.project_path = vs.project_path
+         WHERE vs.project_path = ?1",
+    )?;
+
+    let result = stmt
+        .query_row(rusqlite::params![project_path], |row| {
+            Ok(ProjectDetail {
+                project_path: row.get(0)?,
+                display_name: row.get(1)?,
+                session_count: row.get(2)?,
+                message_count: row.get(3)?,
+                total_tokens: row.get(4)?,
+                file_operations: row.get(5)?,
+                git_operations: row.get(6)?,
+                first_activity: row.get(7)?,
+                last_activity: row.get(8)?,
+            })
+        })
+        .optional()?;
+
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema;
+
+    fn setup_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        schema::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    /// Insert a test session and corresponding projects row.
+    fn seed_project(conn: &Connection, session_id: &str, project_path: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (session_id, project_path, first_seen_at)
+             VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+            rusqlite::params![session_id, project_path],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO projects (project_path, display_name, first_seen, last_seen, session_count)
+             VALUES (?1, ?2, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z',
+                     (SELECT COUNT(*) FROM sessions WHERE project_path = ?1))
+             ON CONFLICT(project_path) DO UPDATE SET
+               session_count = (SELECT COUNT(*) FROM sessions WHERE project_path = ?1)",
+            rusqlite::params![project_path, project_path.split('/').last().unwrap_or("")],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_list_projects_returns_entries() {
+        let conn = setup_db();
+        seed_project(&conn, "sess-a", "/Users/dev/Projects/alpha");
+        seed_project(&conn, "sess-b", "/Users/dev/Projects/beta");
+
+        let projects = list_projects(&conn, 10).unwrap();
+        assert_eq!(projects.len(), 2);
+        let paths: Vec<&str> = projects.iter().map(|p| p.project_path.as_str()).collect();
+        assert!(paths.contains(&"/Users/dev/Projects/alpha"));
+        assert!(paths.contains(&"/Users/dev/Projects/beta"));
+    }
+
+    #[test]
+    fn test_list_projects_respects_limit() {
+        let conn = setup_db();
+        seed_project(&conn, "sess-1", "/Users/dev/Projects/one");
+        seed_project(&conn, "sess-2", "/Users/dev/Projects/two");
+        seed_project(&conn, "sess-3", "/Users/dev/Projects/three");
+
+        let projects = list_projects(&conn, 2).unwrap();
+        assert_eq!(projects.len(), 2);
+    }
+
+    #[test]
+    fn test_get_project_returns_detail() {
+        let conn = setup_db();
+        let path = "/Users/dev/Projects/myapp";
+        seed_project(&conn, "sess-detail", path);
+
+        // Insert a message so v_project_summary has data
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp)
+             VALUES ('msg-1', 'sess-detail', 'user', '2026-01-01T01:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let detail = get_project(&conn, path).unwrap();
+        assert!(detail.is_some(), "get_project should return Some for an existing project");
+        let d = detail.unwrap();
+        assert_eq!(d.project_path, path);
+        assert_eq!(d.session_count, 1);
+        assert_eq!(d.message_count, 1);
+    }
+
+    #[test]
+    fn test_get_project_returns_none_for_missing() {
+        let conn = setup_db();
+        let detail = get_project(&conn, "/nonexistent/path").unwrap();
+        assert!(detail.is_none());
+    }
 }

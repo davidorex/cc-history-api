@@ -68,6 +68,22 @@ pub fn decompose_record(
         }
     };
 
+    // Upsert the project row for full-base record types that carry a cwd.
+    // QueueOperation, Summary, and FileHistorySnapshot lack a RecordBase,
+    // so they are skipped.
+    let maybe_base = match record {
+        JSONLRecord::User(r) => Some(&r.base),
+        JSONLRecord::Assistant(r) => Some(&r.base),
+        JSONLRecord::Progress(r) => Some(&r.base),
+        JSONLRecord::System(r) => Some(&r.base),
+        _ => None,
+    };
+    if let Some(base) = maybe_base {
+        if !base.cwd.is_empty() {
+            result.rows_inserted += upsert_project(base, tx)?;
+        }
+    }
+
     // Second pass: artifact extraction from tool_use blocks.
     // Runs in same transaction for atomicity. Produces file_operations
     // and git_operations rows from Write/Edit/Read/Bash tool inputs.
@@ -76,6 +92,24 @@ pub fn decompose_record(
         crate::artifacts::decompose_artifacts(record, session_id_from_file, tx)?;
 
     Ok(result)
+}
+
+/// Upsert a project row from a full-base record's RecordBase.
+///
+/// Uses INSERT ... ON CONFLICT to create or update the projects row.
+/// display_name is derived from the last path component. session_count is
+/// recomputed from sessions on each conflict to stay accurate.
+/// Only called when base.cwd is non-empty (has a project_path).
+fn upsert_project(base: &RecordBase, tx: &Transaction) -> Result<usize, rusqlite::Error> {
+    let display_name = base.cwd.split('/').last().unwrap_or("");
+    tx.execute(
+        "INSERT INTO projects (project_path, display_name, first_seen, last_seen, session_count)
+         VALUES (?1, ?2, ?3, ?3, 1)
+         ON CONFLICT(project_path) DO UPDATE SET
+           last_seen = MAX(projects.last_seen, excluded.last_seen),
+           session_count = (SELECT COUNT(DISTINCT session_id) FROM sessions WHERE project_path = ?1)",
+        rusqlite::params![base.cwd, display_name, base.timestamp],
+    )
 }
 
 /// Upsert a session row from a full-base record's RecordBase.
@@ -435,8 +469,12 @@ fn decompose_assistant(
     Ok(result)
 }
 
-/// Decompose a progress record into sessions + progress_events rows.
+/// Decompose a progress record into a session upsert + drift logging.
 /// [DECOMP-03]
+///
+/// progress_events INSERT intentionally dropped — these records
+/// (agent_progress, bash_progress, hook_progress, mcp_progress)
+/// carry zero semantic value and dominated ~70% of database size.
 fn decompose_progress(
     r: &ProgressRecord,
     tx: &Transaction,
@@ -446,30 +484,12 @@ fn decompose_progress(
     // 1. Upsert session
     result.rows_inserted += upsert_session(&r.base, tx)?;
 
-    // 2. Extract data_type from the data JSON object
-    let data_type = r
-        .data
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    // 2. Skip progress_events INSERT — these records (agent_progress,
+    // bash_progress, hook_progress, mcp_progress) carry zero semantic value
+    // and account for ~70% of database size. Session upsert and drift
+    // logging are preserved; only the blob storage is eliminated.
 
-    let data_json = serde_json::to_string(&r.data)?;
-
-    // 3. Insert progress_events row
-    let changed = tx.execute(
-        "INSERT OR IGNORE INTO progress_events (uuid, session_id, timestamp, data_type, data_json)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            r.base.uuid,
-            r.base.session_id,
-            r.base.timestamp,
-            data_type,
-            data_json,
-        ],
-    )?;
-    result.rows_inserted += changed;
-
-    // 4. Log overflow
+    // 3. Log overflow
     result.overflow_fields += drift::log_overflow(
         &r.base.version,
         "progress",
@@ -480,8 +500,12 @@ fn decompose_progress(
     Ok(result)
 }
 
-/// Decompose a queue-operation record into a queue_operations row.
+/// Decompose a queue-operation record — drift logging only.
 /// [DECOMP-04]
+///
+/// queue_operations INSERT intentionally dropped — enqueue content
+/// duplicates user prompts already in messages, and scheduling ops
+/// (dequeue/remove/popAll) carry no project intelligence.
 ///
 /// No session upsert — queue operations have session_id but lack the full
 /// session metadata (project_path, version, etc.) needed for a meaningful
@@ -492,12 +516,9 @@ fn decompose_queue_operation(
 ) -> Result<DecomposeResult, DecomposeError> {
     let mut result = DecomposeResult::default();
 
-    let changed = tx.execute(
-        "INSERT INTO queue_operations (session_id, operation, timestamp, content)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![r.session_id, r.operation, r.timestamp, r.content],
-    )?;
-    result.rows_inserted += changed;
+    // Skip queue_operations INSERT — enqueue content duplicates the raw
+    // user prompt (already in messages), dequeue/remove/popAll are internal
+    // scheduling state with no project intelligence value.
 
     // Log overflow — version is not available on queue-operation records,
     // so we use "unknown" as the version context
@@ -843,7 +864,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 3: ProgressRecord -> progress_events row with correct data_type
+    // Test 3: ProgressRecord -> session upsert only (progress_events INSERT
+    // dropped — zero semantic value, ~70% of database bloat)
     // -----------------------------------------------------------------------
     #[test]
     fn test_decompose_progress() {
@@ -863,30 +885,23 @@ mod tests {
         let result = decompose_progress(&record, &tx).unwrap();
         tx.commit().unwrap();
 
-        let data_type: String = conn
+        // Session row should still be created
+        let session_count: i64 = conn
             .query_row(
-                "SELECT data_type FROM progress_events WHERE uuid = 'prog-001'",
+                "SELECT COUNT(*) FROM sessions WHERE session_id = 'sess-003'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(data_type, "hook_progress");
+        assert_eq!(session_count, 1, "session upsert still fires");
 
-        let data_json: String = conn
-            .query_row(
-                "SELECT data_json FROM progress_events WHERE uuid = 'prog-001'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&data_json).unwrap();
-        assert_eq!(parsed["hookEvent"], "pre-commit");
-
-        assert!(result.rows_inserted >= 2, "session + progress_events");
+        // progress_events table dropped by migration 005 — no rows to check
+        assert_eq!(result.rows_inserted, 1, "session only");
     }
 
     // -----------------------------------------------------------------------
-    // Test 4: QueueOperationRecord -> queue_operations row
+    // Test 4: QueueOperationRecord -> no rows (INSERT dropped — enqueue
+    // content duplicates user prompt, scheduling ops are internal noise)
     // -----------------------------------------------------------------------
     #[test]
     fn test_decompose_queue_operation() {
@@ -904,25 +919,8 @@ mod tests {
         let result = decompose_queue_operation(&record, &tx).unwrap();
         tx.commit().unwrap();
 
-        let operation: String = conn
-            .query_row(
-                "SELECT operation FROM queue_operations WHERE session_id = 'sess-004'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(operation, "enqueue");
-
-        let content: String = conn
-            .query_row(
-                "SELECT content FROM queue_operations WHERE session_id = 'sess-004'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(content, "Fix the bug");
-
-        assert_eq!(result.rows_inserted, 1);
+        // queue_operations table dropped by migration 005 — no rows to check
+        assert_eq!(result.rows_inserted, 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1158,30 +1156,18 @@ mod tests {
 
         tx.commit().unwrap();
 
-        // Verify: 3 messages (user, assistant, system via messages table — progress
-        // goes to progress_events, queue to queue_operations, summary to summaries)
-        // Actually: user, assistant go to messages. system_events has its own table.
-        // Progress goes to progress_events. Let me verify each table.
+        // Verify each record type landed in its target table.
+        // progress_events and queue_operations dropped by migration 005.
 
         let msg_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(msg_count, 2, "user + assistant in messages table");
 
-        let prog_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM progress_events", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(prog_count, 1, "1 progress event");
-
         let sys_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM system_events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(sys_count, 1, "1 system event");
-
-        let q_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM queue_operations", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(q_count, 1, "1 queue operation");
 
         let sum_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM summaries", [], |row| row.get(0))
@@ -1391,17 +1377,19 @@ mod tests {
             overflow: HashMap::new(),
         };
 
-        decompose_progress(&record, &tx).unwrap();
+        let result = decompose_progress(&record, &tx).unwrap();
         tx.commit().unwrap();
 
-        let data_type: String = conn
+        // progress_events INSERT dropped — verify session still created
+        let session_count: i64 = conn
             .query_row(
-                "SELECT data_type FROM progress_events WHERE uuid = 'prog-nodata'",
+                "SELECT COUNT(*) FROM sessions WHERE session_id = 'sess-prog2'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(data_type, "unknown");
+        assert_eq!(session_count, 1, "session upsert still fires");
+        assert_eq!(result.rows_inserted, 1, "session only");
     }
 
     // -----------------------------------------------------------------------
@@ -1441,5 +1429,112 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&extra_json).unwrap();
         assert_eq!(parsed["hookCount"], 3);
         assert!(parsed["hookInfos"].is_array());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: upsert_project creates a projects row during decompose_record
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_record_creates_project() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let record = JSONLRecord::User(UserRecord {
+            base: test_base("user-proj", "sess-proj"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("test".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow: HashMap::new(),
+        });
+
+        decompose_record(&record, "sess-proj", &tx).unwrap();
+        tx.commit().unwrap();
+
+        // Verify projects row was created
+        let display_name: String = conn
+            .query_row(
+                "SELECT display_name FROM projects WHERE project_path = '/home/user/project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(display_name, "project");
+
+        let session_count: i64 = conn
+            .query_row(
+                "SELECT session_count FROM projects WHERE project_path = '/home/user/project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_count, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: upsert_project updates session_count for same project_path
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_record_updates_project_session_count() {
+        let conn = setup_db();
+
+        // First session
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let record = JSONLRecord::User(UserRecord {
+                base: test_base("user-p1", "sess-p1"),
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: MessageContent::Text("first".to_string()),
+                },
+                source_tool_assistant_uuid: None,
+                tool_use_result: None,
+                thinking_metadata: None,
+                todos: None,
+                permission_mode: None,
+                overflow: HashMap::new(),
+            });
+            decompose_record(&record, "sess-p1", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Second session with same project_path but different session_id
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut base2 = test_base("user-p2", "sess-p2");
+            // cwd is the same "/home/user/project" from test_base
+            base2.cwd = "/home/user/project".to_string();
+
+            let record = JSONLRecord::User(UserRecord {
+                base: base2,
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: MessageContent::Text("second".to_string()),
+                },
+                source_tool_assistant_uuid: None,
+                tool_use_result: None,
+                thinking_metadata: None,
+                todos: None,
+                permission_mode: None,
+                overflow: HashMap::new(),
+            });
+            decompose_record(&record, "sess-p2", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Verify session_count is now 2
+        let session_count: i64 = conn
+            .query_row(
+                "SELECT session_count FROM projects WHERE project_path = '/home/user/project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_count, 2, "session_count should reflect both sessions");
     }
 }
