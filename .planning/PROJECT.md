@@ -12,30 +12,30 @@ Universal, language-agnostic, queryable access to Claude Code's complete session
 
 ### Validated
 
-(None yet — ship to validate)
+- Exact serde modeling of every JSONL record type with overflow capture for unknown fields — v1.0
+- Streaming JSONL parser with byte-offset awareness for incremental sync — v1.0
+- Normalized SQLite store (sessions, messages, content blocks, token usage, tool executions, agents) — v1.0
+- Artifact layer: file operations table tracking every Write/Edit/Read/Bash that touches files — v1.0
+- Artifact layer: git operations table extracted from Bash tool calls matching git patterns — v1.0
+- File content reconstruction engine — replay writes and edits to reconstruct file state at any message point — v1.0
+- Incremental sync engine with byte-offset tracking (only process new bytes) — v1.0
+- FTS5 full-text search across message content and file contents — v1.0
+- File watcher via notify crate for real-time JSONL ingestion — v1.0
+- Bulk import: walk ~/.claude/projects/ and sync every .jsonl file — v1.0
+- HTTP API (axum) at /v1/ — sessions, messages, search, analytics, files, git, artifacts, schema drift — v1.0
+- Flexible query endpoints (POST /v1/messages/query, POST /v1/files/query) with parameterized SQL compilation — v1.0
+- SSE event stream for real-time events (record:added, file:written, git:commit, schema:drift) — v1.0
+- Unix domain socket serving the same HTTP API for lower-latency local consumers — v1.0
+- CLI interface: serve, sync, query, sessions, search, stats, export, files, git-log, reconstruct, artifacts — v1.0
+- Active version monitoring — detect Claude Code version changes, flag new schema fields — v1.0
+- Schema drift detection via serde(flatten) overflow fields logged to schema_drift_log table — v1.0
+- Embedded migrations (include_str!) with schema_version pragma tracking — v1.0
+- Tool result matching: link tool_use in assistant messages to tool_result in subsequent user messages by tool_use_id — v1.0
+- Daemon mode (claude-history serve) and one-shot mode (sync, query, etc.) — v1.0
 
 ### Active
 
-- [ ] Exact serde modeling of every JSONL record type with overflow capture for unknown fields
-- [ ] Streaming JSONL parser with byte-offset awareness for incremental sync
-- [ ] Normalized SQLite store (sessions, messages, content blocks, token usage, tool executions, agents, queue operations, progress events)
-- [ ] Artifact layer: file operations table tracking every Write/Edit/Read/Bash that touches files
-- [ ] Artifact layer: git operations table extracted from Bash tool calls matching git patterns
-- [ ] File content reconstruction engine — replay writes and edits to reconstruct file state at any message point
-- [ ] Incremental sync engine with byte-offset tracking (only process new bytes)
-- [ ] FTS5 full-text search across message content and file contents
-- [ ] File watcher via notify crate for real-time JSONL ingestion
-- [ ] Bulk import: walk ~/.claude/projects/ and sync every .jsonl file
-- [ ] HTTP API (axum) at /v1/ — sessions, messages, search, analytics, files, git, artifacts, schema drift
-- [ ] Flexible query endpoints (POST /v1/messages/query, POST /v1/files/query) with parameterized SQL compilation
-- [ ] SSE event stream for real-time events (record:added, file:written, git:commit, schema:drift)
-- [ ] Unix domain socket serving the same HTTP API for lower-latency local consumers
-- [ ] CLI interface: serve, sync, query, sessions, search, stats, export, files, git-log, reconstruct, artifacts
-- [ ] Active version monitoring — detect Claude Code version changes, flag new schema fields
-- [ ] Schema drift detection via serde(flatten) overflow fields logged to schema_drift_log table
-- [ ] Embedded migrations (include_str!) with schema_version pragma tracking
-- [ ] Tool result matching: link tool_use in assistant messages to tool_result in subsequent user messages by tool_use_id
-- [ ] Daemon mode (claude-history serve) and one-shot mode (sync, query, etc.)
+(None — v1.0 shipped all requirements)
 
 ### Out of Scope
 
@@ -69,13 +69,23 @@ The artifact layer (files, file_operations, git_operations tables) provides stru
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Rust over TypeScript | Single binary, zero deps, serde enum system maps directly to JSONL discriminated records, zero-cost drift capture | -- Pending |
-| Cargo workspace (3 crates) | Separation of concerns: core types are reusable, store is the engine, server is the interface | -- Pending |
-| serde(flatten) overflow on every struct | Never discard unknown fields; enables active schema drift detection | -- Pending |
-| Byte-offset incremental sync | Only read new bytes from JSONL files; append-only nature of session logs makes this safe | -- Pending |
-| Tool result matching via buffered assistant message | tool_use is in assistant msg, tool_result is in next user msg — decomposer buffers and matches by tool_use_id | -- Pending |
-| Artifact layer as secondary decomposition pass | File/git operations extracted from tool_use blocks in same transaction as message decomposition | -- Pending |
-| File content reconstruction via operation replay | Replay writes + edits in timestamp order to reconstruct file state at any point — session-derived version control | -- Pending |
+| Rust over TypeScript | Single binary, zero deps, serde enum system maps directly to JSONL discriminated records, zero-cost drift capture | Good |
+| Cargo workspace (3 crates) | Separation of concerns: core types are reusable, store is the engine, server is the interface | Good |
+| serde(flatten) overflow on every struct | Never discard unknown fields; enables active schema drift detection | Good |
+| Byte-offset incremental sync | Only read new bytes from JSONL files; append-only nature of session logs makes this safe | Good |
+| Tool result matching via buffered assistant message | tool_use is in assistant msg, tool_result is in next user msg — decomposer buffers and matches by tool_use_id | Good |
+| Artifact layer as secondary decomposition pass | File/git operations extracted from tool_use blocks in same transaction as message decomposition | Good |
+| File content reconstruction via operation replay | Replay writes + edits in timestamp order to reconstruct file state at any point — session-derived version control | Good |
+| Drop progress_events and queue_operations | ~70% of database size with zero semantic value; session upsert and drift logging preserved | Good |
+| version_history table (not schema_versions) | Avoids naming collision with migration tracker bootstrap table in schema.rs | Good |
+| Ingestion-triggered version detection | No separate polling loop; check_version_change fires on every sync event from watcher | Good |
+
+## Context
+
+Shipped v1.0 with 16,688 LOC (15,969 Rust + 719 SQL), 39 source files, 6 SQL migrations, 148 tests.
+Tech stack: Rust, rusqlite 0.37, tokio-rusqlite 0.7, axum 0.8, tokio 1, notify 7, clap 4, serde 1.
+3-crate Cargo workspace: core (types+parser), store (SQLite+decomposition+sync+FTS), server (HTTP+CLI+events).
+27 API endpoints, 15 CLI subcommands, 7 SSE event types, 6 migrations.
 
 ---
-*Last updated: 2026-02-20 after initialization*
+*Last updated: 2026-02-21 after v1.0 milestone*
