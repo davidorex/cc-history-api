@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: HTTP API and Daemon** - axum HTTP API at /v1/, Unix domain socket, daemon mode with graceful shutdown
 - [x] **Phase 4: Real-Time Ingestion and Events** - File watcher for live JSONL changes, SSE event stream for connected consumers
 - [x] **Phase 5: Artifact Layer** - File operation tracking, git operation extraction, tool result matching, content reconstruction, artifact API and CLI
-- [ ] **Phase 6: Version Monitoring** - Active Claude Code version detection, schema drift analysis across versions
+- [x] **Phase 6: Version Monitoring** - Active Claude Code version detection, schema drift analysis across versions
 
 ## Phase Details
 
@@ -124,10 +124,10 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 06-01-PLAN.md — Migration 006: version_history table, messages columns, drift enhancement, view recreation
-- [ ] 06-02-PLAN.md — Decomposer compact summary extraction and drift occurrence tracking
-- [ ] 06-03-PLAN.md — Watcher version persistence and enhanced query layer
-- [ ] 06-04-PLAN.md — API handlers and CLI enhancement for version monitoring
+- [x] 06-01-PLAN.md — Migration 006: version_history table, messages columns, drift enhancement, view recreation
+- [x] 06-02-PLAN.md — Decomposer compact summary extraction and drift occurrence tracking
+- [x] 06-03-PLAN.md — Watcher version persistence and enhanced query layer
+- [x] 06-04-PLAN.md — API handlers and CLI enhancement for version monitoring
 
 ## Progress
 
@@ -142,4 +142,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 3. HTTP API and Daemon | 6/6 | Complete | 2026-02-20 |
 | 4. Real-Time Ingestion and Events | 2/2 | Complete | 2026-02-20 |
 | 5. Artifact Layer | 8/8 | Complete | 2026-02-20 |
-| 6. Version Monitoring | 0/4 | Not started | - |
+| 6. Version Monitoring | 4/4 | Complete | 2026-02-21 |
