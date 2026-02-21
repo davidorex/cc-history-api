@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Universal, language-agnostic, queryable access to Claude Code's complete session history through a single binary that never discards data and actively detects schema evolution.
-**Current focus:** Phase 6 - Version Monitoring -- PLANNED
+**Current focus:** Phase 6 - Version Monitoring -- IN PROGRESS
 
 ## Current Position
 
-Phase: 6 of 6 (Version Monitoring) -- PLANNED
-Plan: 0 of 4 in current phase
-Status: Phase 6 planned with 4 plans across 4 waves (8 tasks total). Ready for execution.
-Last activity: 2026-02-21 -- Phase 6 planning complete (4 plans: migration, decomposer, watcher+queries, API+CLI)
+Phase: 6 of 6 (Version Monitoring) -- IN PROGRESS
+Plan: 1 of 4 in current phase
+Status: Plan 06-01 (migration) complete. Plans 06-02 through 06-04 remain.
+Last activity: 2026-02-21 -- Completed 06-01-PLAN.md (version monitoring migration)
 
-Progress: [██████████] ~85% (23 of ~27 total plans)
+Progress: [███████████] ~89% (24 of ~27 total plans)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 22
-- Average duration: ~4.9 min
+- Total plans completed: 23
+- Average duration: ~4.7 min
 - Total execution time: ~1.8 hours
 
 **By Phase:**
@@ -34,8 +34,8 @@ Progress: [██████████] ~85% (23 of ~27 total plans)
 | 05 | 8/8 | 25 min | 3.1 min |
 
 **Recent Trend:**
-- Last 5 plans: 3, 3, 3, 3, 3 min
-- Trend: 05-08 SSE Artifact Events completed in 3 min — 2 deviations (explicit closure type annotations, rusqlite re-export import)
+- Last 5 plans: 3, 3, 3, 3, 2 min
+- Trend: 06-01 Version Monitoring Migration completed in 2 min — 1 deviation (db.rs hardcoded migration count assertion)
 
 *Updated after each plan completion*
 
@@ -95,6 +95,10 @@ Recent decisions affecting current work:
 - [05-03]: UPDATE tool_executions matches on tool_use_id alone (not message_uuid) — tool_result arrives in user message while tool_executions row belongs to assistant message
 - [05-04]: lib.rs pub mod artifact_queries co-committed with artifact_queries.rs creation — tests use crate::schema which requires module registration, same pattern as decision [05-02]
 - [05-05]: Fixed migration 003 FTS5 column names from content_col/old_content_col/command_col to content/old_content/command — FTS5 external-content rebuild reads source table columns using FTS column names, so they must match the source table's actual column names
+- [06-01]: version_history table named to avoid collision with schema_versions migration tracker — schema_versions is bootstrap code in schema.rs
+- [06-01]: is_compact_summary defaults to 0 for all existing messages rows — precise backfill deferred to enhanced decomposer on future syncs
+- [06-01]: new_fields_count backfilled via correlated subquery attributing drift fields to first-appearance version
+- [06-01]: All 7 analytical views filter on is_compact_summary = 0 at JOIN level for consistent INNER/LEFT JOIN behavior
 
 ### Pending Todos
 
@@ -107,5 +111,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-21
-Stopped at: Phase 6 planning complete. 4 plans ready for execution.
-Resume file: .planning/phases/06-version-monitoring/plan-breakdown.json
+Stopped at: Plan 06-01 complete. Plans 06-02 through 06-04 remain for execution.
+Resume file: .planning/phases/06-version-monitoring/06-02-PLAN.md
