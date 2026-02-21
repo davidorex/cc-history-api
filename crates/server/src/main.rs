@@ -938,9 +938,10 @@ async fn run_export(
 
 /// Show Claude Code version history detected from ingested data.
 ///
-/// [CLI-08, CLI-15] Routes through daemon HTTP API when available, otherwise
-/// uses direct DB access via store::query::version_history. Output format
-/// is identical regardless of data source.
+/// [CLI-08, CLI-15, VER-01] Routes through daemon HTTP API when available,
+/// otherwise uses direct DB access via store::query::version_history_enhanced.
+/// Displays a 5-column table: VERSION, FIRST_SEEN, LAST_SEEN, SESSIONS,
+/// NEW_FIELDS. Output format is identical regardless of data source.
 async fn run_version_check(mode: ConnectionMode, json: bool) -> ExitCode {
     let results = match mode {
         ConnectionMode::Daemon(client) => {
@@ -958,7 +959,7 @@ async fn run_version_check(mode: ConnectionMode, json: bool) -> ExitCode {
         }
         ConnectionMode::Direct { conn, .. } => {
             match conn
-                .call(move |conn| claude_history_store::query::version_history(conn))
+                .call(move |conn| claude_history_store::query::version_history_enhanced(conn))
                 .await
             {
                 Ok(r) => r,
@@ -980,49 +981,20 @@ async fn run_version_check(mode: ConnectionMode, json: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     } else {
-        println!(
-            "{:<30}  {:<24}  {:<24}",
-            "VERSION", "FIRST_SEEN", "LAST_SEEN"
-        );
-        println!(
-            "{:<30}  {:<24}  {:<24}",
-            "------------------------------",
-            "------------------------",
-            "------------------------"
-        );
-        for entry in &results {
-            let version_display = if entry.version.len() > 30 {
-                &entry.version[..30]
-            } else {
-                &entry.version
-            };
-            let first_display = if entry.first_seen.len() > 24 {
-                &entry.first_seen[..24]
-            } else {
-                &entry.first_seen
-            };
-            let last_display = if entry.last_seen.len() > 24 {
-                &entry.last_seen[..24]
-            } else {
-                &entry.last_seen
-            };
-            println!(
-                "{:<30}  {:<24}  {:<24}",
-                version_display, first_display, last_display
-            );
-        }
+        output::print_version_history(&results);
     }
 
     ExitCode::SUCCESS
 }
 
-/// Show schema drift events (unknown fields captured during ingestion).
+/// Show schema drift events grouped by version and record type.
 ///
-/// [CLI-09, CLI-15] Routes through daemon HTTP API when available, otherwise
-/// uses direct DB access via store::query::schema_drift_list. In daemon mode,
-/// the daemon applies record_type filtering and limit on the server side.
-/// In direct mode, filtering and limit are applied in Rust post-retrieval.
-/// Output format is identical regardless of data source.
+/// [CLI-09, CLI-15, VER-03] Routes through daemon HTTP API when available,
+/// otherwise uses direct DB access via store::query::drift_by_version.
+/// In daemon mode, the daemon applies record_type filtering and limit
+/// server-side. In direct mode, filtering and limit are applied in Rust
+/// post-retrieval. Output shows grouped format by version and record type
+/// with promotion status and occurrence counts.
 async fn run_schema_drift(
     mode: ConnectionMode,
     record_type: Option<String>,
@@ -1037,7 +1009,7 @@ async fn run_schema_drift(
             );
             // Daemon endpoint handles record_type filter and limit server-side.
             match client
-                .schema_drift(record_type.as_deref(), Some(limit))
+                .schema_drift_grouped(record_type.as_deref(), Some(limit))
                 .await
             {
                 Ok(r) => r,
@@ -1048,8 +1020,8 @@ async fn run_schema_drift(
             }
         }
         ConnectionMode::Direct { conn, .. } => {
-            let all_results = match conn
-                .call(move |conn| claude_history_store::query::schema_drift_list(conn))
+            let mut groups = match conn
+                .call(move |conn| claude_history_store::query::drift_by_version(conn))
                 .await
             {
                 Ok(r) => r,
@@ -1060,17 +1032,41 @@ async fn run_schema_drift(
             };
 
             // Apply record_type filter in Rust if provided
-            let filtered: Vec<_> = if let Some(ref rt) = record_type {
-                all_results
-                    .into_iter()
-                    .filter(|e| e.record_type == *rt)
-                    .collect()
-            } else {
-                all_results
-            };
+            if let Some(ref rt) = record_type {
+                for group in &mut groups {
+                    group
+                        .record_types
+                        .retain(|rt_group| rt_group.record_type.contains(rt.as_str()));
+                }
+                groups.retain(|g| !g.record_types.is_empty());
+            }
 
-            // Apply limit truncation
-            filtered.into_iter().take(limit).collect()
+            // Apply limit by counting total fields across all groups
+            let mut total_fields = 0usize;
+            let mut truncated = Vec::new();
+            for group in groups {
+                if total_fields >= limit {
+                    break;
+                }
+                let mut truncated_rts = Vec::new();
+                for mut rt in group.record_types {
+                    if total_fields >= limit {
+                        break;
+                    }
+                    let remaining = limit - total_fields;
+                    if rt.fields.len() > remaining {
+                        rt.fields.truncate(remaining);
+                    }
+                    total_fields += rt.fields.len();
+                    truncated_rts.push(rt);
+                }
+                truncated.push(claude_history_store::query::VersionDriftGroup {
+                    version: group.version,
+                    record_types: truncated_rts,
+                });
+            }
+
+            truncated
         }
     };
 
@@ -1084,51 +1080,7 @@ async fn run_schema_drift(
             return ExitCode::FAILURE;
         }
     } else {
-        println!(
-            "{:<25}  {:<20}  {:<16}  {:<24}  {:<50}",
-            "FIELD", "RECORD_TYPE", "VERSION", "FIRST_SEEN", "SAMPLE_VALUE"
-        );
-        println!(
-            "{:<25}  {:<20}  {:<16}  {:<24}  {:<50}",
-            "-------------------------",
-            "--------------------",
-            "----------------",
-            "------------------------",
-            "--------------------------------------------------"
-        );
-        for entry in &results {
-            let field_display = if entry.field_name.len() > 25 {
-                &entry.field_name[..25]
-            } else {
-                &entry.field_name
-            };
-            let rt_display = if entry.record_type.len() > 20 {
-                &entry.record_type[..20]
-            } else {
-                &entry.record_type
-            };
-            let version_display = entry.version.as_deref().unwrap_or("-");
-            let version_display = if version_display.len() > 16 {
-                &version_display[..16]
-            } else {
-                version_display
-            };
-            let first_seen_display = if entry.first_seen_at.len() > 24 {
-                &entry.first_seen_at[..24]
-            } else {
-                &entry.first_seen_at
-            };
-            let sample = entry.sample_value.as_deref().unwrap_or("-");
-            let sample_display = if sample.len() > 50 {
-                &sample[..50]
-            } else {
-                sample
-            };
-            println!(
-                "{:<25}  {:<20}  {:<16}  {:<24}  {:<50}",
-                field_display, rt_display, version_display, first_seen_display, sample_display
-            );
-        }
+        output::print_drift_grouped(&results);
     }
 
     ExitCode::SUCCESS

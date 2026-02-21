@@ -11,7 +11,9 @@
 
 use claude_history_store::artifact_queries::{FileEntry, FileOperation, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
-use claude_history_store::query::{ModelStats, SessionSummary, TokenStats, ToolStats};
+use claude_history_store::query::{
+    ModelStats, SessionSummary, TokenStats, ToolStats, VersionDriftGroup, VersionHistoryEntry,
+};
 
 /// Print search results in human-readable format.
 ///
@@ -358,6 +360,116 @@ pub fn print_artifacts(artifacts: &SessionArtifacts) {
         "Tool Executions: {} total",
         artifacts.tool_executions.len()
     );
+}
+
+/// Print version history in a 5-column table.
+///
+/// Columns: VERSION (30 chars), FIRST_SEEN (24 chars), LAST_SEEN (24 chars),
+/// SESSIONS (right-aligned 8 chars), NEW_FIELDS (right-aligned 10 chars).
+pub fn print_version_history(entries: &[VersionHistoryEntry]) {
+    if entries.is_empty() {
+        println!("No version data found.");
+        return;
+    }
+
+    println!(
+        "{:<30}  {:<24}  {:<24}  {:>8}  {:>10}",
+        "VERSION", "FIRST_SEEN", "LAST_SEEN", "SESSIONS", "NEW_FIELDS"
+    );
+    println!(
+        "{:<30}  {:<24}  {:<24}  {:>8}  {:>10}",
+        "------------------------------",
+        "------------------------",
+        "------------------------",
+        "--------",
+        "----------"
+    );
+
+    for entry in entries {
+        let version_display = if entry.version.len() > 30 {
+            &entry.version[..30]
+        } else {
+            &entry.version
+        };
+        let first_display = if entry.first_seen_at.len() > 24 {
+            &entry.first_seen_at[..24]
+        } else {
+            &entry.first_seen_at
+        };
+        let last_display = if entry.last_seen_at.len() > 24 {
+            &entry.last_seen_at[..24]
+        } else {
+            &entry.last_seen_at
+        };
+        println!(
+            "{:<30}  {:<24}  {:<24}  {:>8}  {:>10}",
+            version_display,
+            first_display,
+            last_display,
+            entry.session_count,
+            entry.new_fields_count
+        );
+    }
+}
+
+/// Print drift entries in a grouped format by version and record type.
+///
+/// Output format:
+/// ```text
+/// Version: 1.0.16
+///   Record Type: user
+///     FIELD                      OCCURRENCES  STATUS      SAMPLE
+///     -------------------------  -----------  ----------  --------------------------------------------------
+///     isCompactSummary                    42  promoted    true
+/// ```
+pub fn print_drift_grouped(groups: &[VersionDriftGroup]) {
+    if groups.is_empty() {
+        println!("No schema drift detected.");
+        return;
+    }
+
+    for (vi, group) in groups.iter().enumerate() {
+        if vi > 0 {
+            println!();
+        }
+        println!("Version: {}", group.version);
+
+        for rt_group in &group.record_types {
+            println!("  Record Type: {}", rt_group.record_type);
+            println!(
+                "    {:<25}  {:>11}  {:<10}  {:<50}",
+                "FIELD", "OCCURRENCES", "STATUS", "SAMPLE"
+            );
+            println!(
+                "    {:<25}  {:>11}  {:<10}  {:<50}",
+                "-------------------------",
+                "-----------",
+                "----------",
+                "--------------------------------------------------"
+            );
+
+            for field in &rt_group.fields {
+                let field_display = if field.field_name.len() > 25 {
+                    &field.field_name[..25]
+                } else {
+                    &field.field_name
+                };
+                let sample = field.sample_value.as_deref().unwrap_or("-");
+                let sample_display = if sample.len() > 50 {
+                    &sample[..50]
+                } else {
+                    sample
+                };
+                println!(
+                    "    {:<25}  {:>11}  {:<10}  {:<50}",
+                    field_display,
+                    field.occurrence_count,
+                    field.promotion_status,
+                    sample_display
+                );
+            }
+        }
+    }
 }
 
 /// Print any Serialize value as pretty-printed JSON to stdout.

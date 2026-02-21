@@ -32,7 +32,8 @@ use crate::api::health::HealthResponse;
 use claude_history_store::artifact_queries::{FileEntry, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{
-    DriftEntry, MessageResult, ModelStats, SessionSummary, TokenStats, ToolStats, VersionEntry,
+    MessageResult, ModelStats, SessionSummary, TokenStats, ToolStats, VersionDriftGroup,
+    VersionHistoryEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -398,19 +399,23 @@ impl DaemonClient {
         self.request("GET", &path, None).await
     }
 
-    /// GET /v1/schema/versions — Claude Code version history.
-    pub async fn version_history(&self) -> Result<Vec<VersionEntry>, DaemonError> {
+    /// GET /v1/schema/versions — enhanced Claude Code version history.
+    ///
+    /// Returns `VersionHistoryEntry` with session_count and new_fields_count.
+    pub async fn version_history(&self) -> Result<Vec<VersionHistoryEntry>, DaemonError> {
         self.get("/v1/schema/versions").await
     }
 
-    /// GET /v1/schema/drift — schema drift log entries.
+    /// GET /v1/schema/drift — schema drift entries grouped by version.
     ///
+    /// Returns `Vec<VersionDriftGroup>` with drift entries grouped by version
+    /// then record_type, including promotion_status and occurrence_count.
     /// Supports optional record_type filter and limit parameters.
-    pub async fn schema_drift(
+    pub async fn schema_drift_grouped(
         &self,
         record_type: Option<&str>,
         limit: Option<usize>,
-    ) -> Result<Vec<DriftEntry>, DaemonError> {
+    ) -> Result<Vec<VersionDriftGroup>, DaemonError> {
         let mut params = Vec::new();
         if let Some(rt) = record_type {
             params.push(format!("record_type={}", urlencoded(rt)));
@@ -425,6 +430,7 @@ impl DaemonClient {
         };
         self.get(&path).await
     }
+
 
     // -------------------------------------------------------------------
     // Artifact endpoint methods
