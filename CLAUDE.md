@@ -6,10 +6,14 @@ After any `cargo build --release`: kill the running daemon and restart it. The d
 
 ```bash
 pgrep -f 'claude-history serve' | xargs kill 2>/dev/null
-/Users/david/Projects/cc-history-api/target/release/claude-history serve &
+claude-history serve &
 ```
 
 If seed queries in `queries/` were modified, copy them to `~/.claude/claude-history/queries/`.
+
+## Binary
+
+`claude-history` is on PATH via symlink: `~/.local/bin/claude-history` → `target/release/claude-history`. Rebuilding the release binary updates the symlink target automatically.
 
 ## Query Authoring
 

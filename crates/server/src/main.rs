@@ -324,20 +324,34 @@ const QUERIES_SCHEMA_HELP: &str = r#"DATABASE SCHEMA:
 AUTHORING QUERIES:
 
   Queries are .sql files in ~/.claude/claude-history/queries/ (override with $CLAUDE_HISTORY_QUERIES).
-  Use :param_name for parameters. Optional .toml sidecar for metadata:
-
-    description = "What this query does"
-    [[params]]
-    name = "project"
-    description = "Project path substring"
-    [[params]]
-    name = "limit"
-    description = "Max results"
-    default = "10"
-    type = "integer"       # text (default), integer, or real
+  Use :param_name for parameters. Optional .toml sidecar for metadata.
 
   Param types control SQLite binding: integer/real bind as numbers, text as strings.
-  Without type hints, use CAST(:param AS INTEGER) for numeric comparisons."#;
+  Without type hints, use CAST(:param AS INTEGER) for numeric comparisons.
+
+  Example — file-edits-by-project.sql:
+
+    SELECT fo.file_path, fo.operation_type, fo.timestamp
+    FROM file_operations fo
+    JOIN sessions s ON fo.session_id = s.session_id
+    WHERE s.project_path LIKE '%' || :project || '%'
+      AND fo.operation_type IN ('write', 'edit')
+    ORDER BY fo.timestamp DESC
+    LIMIT :limit
+
+  Example — file-edits-by-project.toml:
+
+    description = "Recent file writes and edits for a project"
+
+    [[params]]
+    name = "project"
+    description = "Project path substring to match"
+
+    [[params]]
+    name = "limit"
+    description = "Maximum results to return"
+    default = "20"
+    type = "integer""#;
 
 /// Resolve the database file path.
 ///
