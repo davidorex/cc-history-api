@@ -1555,10 +1555,15 @@ async fn run_queries_show(name: String, queries_dir_arg: Option<PathBuf>) -> Exi
                 Some(d) => format!(" (default: {})", d),
                 None => " (required)".to_string(),
             };
+            let type_str = match p.param_type {
+                claude_history_store::query_registry::ParamType::Text => "",
+                claude_history_store::query_registry::ParamType::Integer => " [integer]",
+                claude_history_store::query_registry::ParamType::Real => " [real]",
+            };
             if p.description.is_empty() {
-                println!("  :{}{}", p.name, default_str);
+                println!("  :{}{}{}", p.name, type_str, default_str);
             } else {
-                println!("  :{} -- {}{}", p.name, p.description, default_str);
+                println!("  :{} -- {}{}{}", p.name, p.description, type_str, default_str);
             }
         }
     }

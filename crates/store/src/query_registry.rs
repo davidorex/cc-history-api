@@ -19,6 +19,19 @@ pub struct CannedQuery {
     pub params: Vec<ParamDef>,
 }
 
+/// Declared type for a query parameter, controlling how the value is bound to SQLite.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ParamType {
+    /// Bind as text (default). Matches SQLite TEXT affinity.
+    #[default]
+    Text,
+    /// Bind as i64. Matches SQLite INTEGER affinity.
+    Integer,
+    /// Bind as f64. Matches SQLite REAL affinity.
+    Real,
+}
+
 /// Definition of a named parameter for a canned query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParamDef {
@@ -29,6 +42,9 @@ pub struct ParamDef {
     pub description: String,
     /// Optional default value. If None, the parameter is required.
     pub default: Option<String>,
+    /// Value type for SQLite binding. Defaults to Text if omitted.
+    #[serde(default, rename = "type")]
+    pub param_type: ParamType,
 }
 
 /// TOML sidecar file format for query metadata.
@@ -111,6 +127,7 @@ pub fn load_queries(dir: &Path) -> Result<HashMap<String, CannedQuery>, Box<dyn 
                     name,
                     description: String::new(),
                     default: None,
+                    param_type: ParamType::default(),
                 })
                 .collect();
             ("No description".to_string(), params)
@@ -201,11 +218,17 @@ pub fn prepare_sql(
     // Discover params from the actual SQL to get positional ordering
     let sql_params = extract_named_params(&query.sql);
 
-    // Build a lookup for defaults from the query definition
+    // Build lookups for defaults and types from the query definition
     let defaults: HashMap<&str, Option<&str>> = query
         .params
         .iter()
         .map(|p| (p.name.as_str(), p.default.as_deref()))
+        .collect();
+
+    let types: HashMap<&str, &ParamType> = query
+        .params
+        .iter()
+        .map(|p| (p.name.as_str(), &p.param_type))
         .collect();
 
     // Assign positional indices (1-based) and resolve values
@@ -217,7 +240,7 @@ pub fn prepare_sql(
         name_to_position.insert(param_name.clone(), position);
 
         // Resolve value: provided > default > error
-        let value = if let Some(v) = params.get(param_name) {
+        let value_str = if let Some(v) = params.get(param_name) {
             v.clone()
         } else if let Some(Some(default)) = defaults.get(param_name.as_str()) {
             default.to_string()
@@ -229,7 +252,38 @@ pub fn prepare_sql(
             .into());
         };
 
-        positional_values.push(serde_json::Value::String(value));
+        // Bind according to declared type
+        let param_type = types.get(param_name.as_str()).copied().unwrap_or(&ParamType::Text);
+        let json_value = match param_type {
+            ParamType::Integer => {
+                let n: i64 = value_str.parse().map_err(|_| {
+                    format!(
+                        "parameter '{}' declared as integer but value '{}' is not a valid integer",
+                        param_name, value_str
+                    )
+                })?;
+                serde_json::Value::Number(serde_json::Number::from(n))
+            }
+            ParamType::Real => {
+                let f: f64 = value_str.parse().map_err(|_| {
+                    format!(
+                        "parameter '{}' declared as real but value '{}' is not a valid number",
+                        param_name, value_str
+                    )
+                })?;
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| {
+                        format!(
+                            "parameter '{}': value '{}' is not a finite number",
+                            param_name, value_str
+                        )
+                    })?
+            }
+            ParamType::Text => serde_json::Value::String(value_str),
+        };
+
+        positional_values.push(json_value);
     }
 
     // Rewrite SQL: replace :param_name with ?N, skipping quoted strings
@@ -342,11 +396,13 @@ mod tests {
                     name: "id".to_string(),
                     description: String::new(),
                     default: None,
+                    param_type: ParamType::Text,
                 },
                 ParamDef {
                     name: "name".to_string(),
                     description: String::new(),
                     default: None,
+                    param_type: ParamType::Text,
                 },
             ],
         };
@@ -372,6 +428,7 @@ mod tests {
                 name: "limit".to_string(),
                 description: "max rows".to_string(),
                 default: Some("20".to_string()),
+                param_type: ParamType::Text,
             }],
         };
 
@@ -391,6 +448,7 @@ mod tests {
                 name: "id".to_string(),
                 description: String::new(),
                 default: None,
+                param_type: ParamType::Text,
             }],
         };
 
@@ -412,6 +470,7 @@ mod tests {
                 name: "real".to_string(),
                 description: String::new(),
                 default: None,
+                param_type: ParamType::Text,
             }],
         };
 
@@ -437,6 +496,7 @@ mod tests {
                 name: "x".to_string(),
                 description: String::new(),
                 default: None,
+                param_type: ParamType::Text,
             }],
         };
 
@@ -454,5 +514,104 @@ mod tests {
         let result = load_queries(Path::new("/nonexistent/path/to/queries"));
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn prepare_sql_binds_integer_type() {
+        let query = CannedQuery {
+            name: "test".to_string(),
+            sql: "SELECT * FROM t WHERE len > :min_len LIMIT :limit".to_string(),
+            description: "test".to_string(),
+            params: vec![
+                ParamDef {
+                    name: "min_len".to_string(),
+                    description: String::new(),
+                    default: None,
+                    param_type: ParamType::Integer,
+                },
+                ParamDef {
+                    name: "limit".to_string(),
+                    description: String::new(),
+                    default: Some("10".to_string()),
+                    param_type: ParamType::Integer,
+                },
+            ],
+        };
+
+        let mut params = HashMap::new();
+        params.insert("min_len".to_string(), "500".to_string());
+
+        let (sql, values) = prepare_sql(&query, &params).unwrap();
+        assert_eq!(sql, "SELECT * FROM t WHERE len > ?1 LIMIT ?2");
+        assert_eq!(values[0], serde_json::json!(500));
+        assert_eq!(values[1], serde_json::json!(10));
+    }
+
+    #[test]
+    fn prepare_sql_binds_real_type() {
+        let query = CannedQuery {
+            name: "test".to_string(),
+            sql: "SELECT * FROM t WHERE score > :threshold".to_string(),
+            description: "test".to_string(),
+            params: vec![ParamDef {
+                name: "threshold".to_string(),
+                description: String::new(),
+                default: None,
+                param_type: ParamType::Real,
+            }],
+        };
+
+        let mut params = HashMap::new();
+        params.insert("threshold".to_string(), "0.75".to_string());
+
+        let (sql, values) = prepare_sql(&query, &params).unwrap();
+        assert_eq!(sql, "SELECT * FROM t WHERE score > ?1");
+        assert_eq!(values[0], serde_json::json!(0.75));
+    }
+
+    #[test]
+    fn prepare_sql_rejects_invalid_integer() {
+        let query = CannedQuery {
+            name: "test".to_string(),
+            sql: "SELECT * FROM t LIMIT :limit".to_string(),
+            description: "test".to_string(),
+            params: vec![ParamDef {
+                name: "limit".to_string(),
+                description: String::new(),
+                default: None,
+                param_type: ParamType::Integer,
+            }],
+        };
+
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "not_a_number".to_string());
+
+        let result = prepare_sql(&query, &params);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("declared as integer"));
+        assert!(err.contains("not_a_number"));
+    }
+
+    #[test]
+    fn prepare_sql_text_type_is_default() {
+        let query = CannedQuery {
+            name: "test".to_string(),
+            sql: "SELECT * FROM t WHERE name = :name".to_string(),
+            description: "test".to_string(),
+            params: vec![ParamDef {
+                name: "name".to_string(),
+                description: String::new(),
+                default: None,
+                param_type: ParamType::Text,
+            }],
+        };
+
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), "42".to_string());
+
+        let (_sql, values) = prepare_sql(&query, &params).unwrap();
+        // Even though "42" looks numeric, text type preserves it as string
+        assert_eq!(values[0], serde_json::Value::String("42".to_string()));
     }
 }
