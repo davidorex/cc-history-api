@@ -472,6 +472,59 @@ pub fn print_drift_grouped(groups: &[VersionDriftGroup]) {
     }
 }
 
+/// Print canned queries in a column-aligned table.
+///
+/// Columns: NAME (20 chars), DESCRIPTION (40 chars), PARAMS (remaining).
+/// Parameters are shown as `name[=default]` separated by commas.
+pub fn print_queries_list(queries: &[&claude_history_store::query_registry::CannedQuery]) {
+    if queries.is_empty() {
+        // Caller handles empty-directory messaging to stderr; this
+        // handles the table-body-empty case if called directly.
+        return;
+    }
+
+    println!(
+        "{:<20}  {:<40}  {}",
+        "NAME", "DESCRIPTION", "PARAMS"
+    );
+    println!(
+        "{:<20}  {:<40}  {}",
+        "--------------------",
+        "----------------------------------------",
+        "------------------------------"
+    );
+
+    for q in queries {
+        let name_display = if q.name.len() > 20 {
+            &q.name[..20]
+        } else {
+            &q.name
+        };
+        let desc_display = if q.description.len() > 40 {
+            format!("{}...", &q.description[..37])
+        } else {
+            q.description.clone()
+        };
+        let params_str: Vec<String> = q
+            .params
+            .iter()
+            .map(|p| {
+                if let Some(ref d) = p.default {
+                    format!("{}={}", p.name, d)
+                } else {
+                    p.name.clone()
+                }
+            })
+            .collect();
+        let params_display = params_str.join(", ");
+
+        println!(
+            "{:<20}  {:<40}  {}",
+            name_display, desc_display, params_display
+        );
+    }
+}
+
 /// Print any Serialize value as pretty-printed JSON to stdout.
 ///
 /// On serialization error, prints error to stderr and returns Err.

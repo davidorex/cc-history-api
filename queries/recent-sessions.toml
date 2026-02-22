@@ -1,0 +1,6 @@
+description = "List recent sessions ordered by last activity"
+
+[[params]]
+name = "limit"
+description = "Maximum number of sessions to return"
+default = "20"

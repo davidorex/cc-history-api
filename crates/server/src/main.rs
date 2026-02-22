@@ -1,10 +1,11 @@
 //! claude-history CLI binary.
 //!
-//! Provides the `claude-history` command with 14 subcommands for syncing JSONL
+//! Provides the `claude-history` command with 15 subcommands for syncing JSONL
 //! session files into a local SQLite database, starting the HTTP/UDS daemon,
 //! searching message content, browsing sessions, querying messages, viewing
 //! usage statistics, exporting sessions, checking Claude Code versions,
-//! inspecting schema drift, and interacting with the artifact layer.
+//! inspecting schema drift, interacting with the artifact layer, and running
+//! canned SQL queries with named parameter binding.
 //!
 //! Usage:
 //!   claude-history serve [--port 7424] [--socket /tmp/claude-history.sock]
@@ -21,6 +22,9 @@
 //!   claude-history reconstruct <path> --session-id <id> [--at <uuid>]
 //!   claude-history git-log [--session-id <id>] [--type <type>] [--limit N] [--json]
 //!   claude-history artifacts <session-id> [--json]
+//!   claude-history queries list [--json] [--queries-dir <path>]
+//!   claude-history queries show <name> [--queries-dir <path>]
+//!   claude-history queries run <name> [--param key=value]... [--json] [--queries-dir <path>]
 //!
 //! All subcommands share a global --db-path option. Logs go to stderr,
 //! structured output to stdout (PAT-020).
@@ -229,6 +233,53 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Manage and run canned SQL queries
+    Queries {
+        #[command(subcommand)]
+        action: QueriesAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum QueriesAction {
+    /// List all available canned queries
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Path to queries directory
+        #[arg(long)]
+        queries_dir: Option<PathBuf>,
+    },
+    /// Show SQL and metadata for a specific query
+    Show {
+        /// Query name (filename without .sql extension)
+        name: String,
+        /// Path to queries directory
+        #[arg(long)]
+        queries_dir: Option<PathBuf>,
+    },
+    /// Execute a canned query with parameter binding
+    Run {
+        /// Query name (filename without .sql extension)
+        name: String,
+        /// Parameters as key=value pairs (repeatable)
+        #[arg(long = "param", value_parser = parse_key_val)]
+        params: Vec<(String, String)>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Path to queries directory
+        #[arg(long)]
+        queries_dir: Option<PathBuf>,
+    },
+}
+
+fn parse_key_val(s: &str) -> Result<(String, String), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
 /// Resolve the database file path.
@@ -320,6 +371,9 @@ async fn main() -> ExitCode {
         Commands::Serve { port, socket, projects_dir } => run_serve(cli.db_path, port, socket, projects_dir).await,
         Commands::Sync { projects_dir } => run_sync(projects_dir, cli.db_path).await,
 
+        // Queries subcommand: list/show are filesystem-only, run needs DB.
+        Commands::Queries { action } => run_queries(action, cli.db_path).await,
+
         // All read-only subcommands: detect daemon vs direct DB once at startup.
         read_cmd => {
             let mode = match resolve_connection_mode(cli.db_path).await {
@@ -386,8 +440,8 @@ async fn main() -> ExitCode {
                 Commands::Artifacts { session_id, json } => {
                     run_artifacts(mode, session_id, json).await
                 }
-                // Serve and Sync already handled above.
-                Commands::Serve { .. } | Commands::Sync { .. } => unreachable!(),
+                // Serve, Sync, and Queries already handled above.
+                Commands::Serve { .. } | Commands::Sync { .. } | Commands::Queries { .. } => unreachable!(),
             }
         }
     }
@@ -1401,4 +1455,231 @@ async fn run_artifacts(
     }
 
     ExitCode::SUCCESS
+}
+
+/// Dispatch the `queries` subcommand group.
+///
+/// List and Show are filesystem-only (no database needed). Run requires a
+/// database connection to execute the prepared SQL through sql_passthrough.
+async fn run_queries(action: QueriesAction, db_path_arg: Option<PathBuf>) -> ExitCode {
+    match action {
+        QueriesAction::List { json, queries_dir } => {
+            run_queries_list(json, queries_dir).await
+        }
+        QueriesAction::Show { name, queries_dir } => {
+            run_queries_show(name, queries_dir).await
+        }
+        QueriesAction::Run {
+            name,
+            params,
+            json,
+            queries_dir,
+        } => run_queries_run(name, params, json, queries_dir, db_path_arg).await,
+    }
+}
+
+/// List all available canned queries from the queries directory.
+///
+/// Filesystem-only: no database connection needed. Loads .sql files from
+/// the queries directory and prints a summary table or JSON.
+async fn run_queries_list(json: bool, queries_dir_arg: Option<PathBuf>) -> ExitCode {
+    let dir = queries_dir_arg.unwrap_or_else(claude_history_store::query_registry::resolve_queries_dir);
+
+    let queries = match claude_history_store::query_registry::load_queries(&dir) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("Error: Failed to load queries from {}: {}", dir.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if queries.is_empty() {
+        eprintln!("No queries found in {}", dir.display());
+        return ExitCode::SUCCESS;
+    }
+
+    if json {
+        let mut list: Vec<&claude_history_store::query_registry::CannedQuery> =
+            queries.values().collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        if output::print_json(&list).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        let mut list: Vec<&claude_history_store::query_registry::CannedQuery> =
+            queries.values().collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        output::print_queries_list(&list);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Show SQL template and metadata for a specific canned query.
+///
+/// Filesystem-only: no database connection needed. Prints the raw SQL,
+/// description, and parameter definitions in human-readable format.
+async fn run_queries_show(name: String, queries_dir_arg: Option<PathBuf>) -> ExitCode {
+    let dir = queries_dir_arg.unwrap_or_else(claude_history_store::query_registry::resolve_queries_dir);
+
+    let queries = match claude_history_store::query_registry::load_queries(&dir) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("Error: Failed to load queries from {}: {}", dir.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let query = match queries.get(&name) {
+        Some(q) => q,
+        None => {
+            eprintln!("Error: Query '{}' not found in {}", name, dir.display());
+            let available: Vec<&str> = queries.keys().map(|k| k.as_str()).collect();
+            if !available.is_empty() {
+                eprintln!("Available queries: {}", available.join(", "));
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("Query: {}", query.name);
+    println!("Description: {}", query.description);
+    println!();
+    println!("SQL:");
+    println!("{}", query.sql);
+
+    if !query.params.is_empty() {
+        println!("Parameters:");
+        for p in &query.params {
+            let default_str = match &p.default {
+                Some(d) => format!(" (default: {})", d),
+                None => " (required)".to_string(),
+            };
+            if p.description.is_empty() {
+                println!("  :{}{}", p.name, default_str);
+            } else {
+                println!("  :{} -- {}{}", p.name, p.description, default_str);
+            }
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Execute a canned query with named parameter binding.
+///
+/// Requires a database connection. Loads the query, converts named :param
+/// placeholders to positional ?N params via prepare_sql, then executes through
+/// sql_passthrough::execute_sql. Output is always JSON (consistent with sql
+/// passthrough behavior).
+async fn run_queries_run(
+    name: String,
+    param_pairs: Vec<(String, String)>,
+    json: bool,
+    queries_dir_arg: Option<PathBuf>,
+    db_path_arg: Option<PathBuf>,
+) -> ExitCode {
+    let dir = queries_dir_arg.unwrap_or_else(claude_history_store::query_registry::resolve_queries_dir);
+
+    let queries = match claude_history_store::query_registry::load_queries(&dir) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("Error: Failed to load queries from {}: {}", dir.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let query = match queries.get(&name) {
+        Some(q) => q.clone(),
+        None => {
+            eprintln!("Error: Query '{}' not found in {}", name, dir.display());
+            let available: Vec<&str> = queries.keys().map(|k| k.as_str()).collect();
+            if !available.is_empty() {
+                eprintln!("Available queries: {}", available.join(", "));
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Convert param pairs to HashMap
+    let params: std::collections::HashMap<String, String> =
+        param_pairs.into_iter().collect();
+
+    // Prepare the SQL with positional parameters
+    let (sql, positional_params) =
+        match claude_history_store::query_registry::prepare_sql(&query, &params) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Error: Parameter binding failed: {}", e);
+                return ExitCode::FAILURE;
+            }
+        };
+
+    // Resolve connection mode for DB access
+    let mode = match resolve_connection_mode(db_path_arg).await {
+        Ok(m) => m,
+        Err(msg) => {
+            eprintln!("Error: {}", msg);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let results = match mode {
+        ConnectionMode::Daemon(_) => {
+            // For daemon mode, fall back to direct DB since the daemon's sql
+            // endpoint expects raw SQL (not canned query names). We already
+            // have the prepared SQL, so open the DB directly.
+            let db_path = match resolve_db_path(None) {
+                Some(p) => p,
+                None => {
+                    eprintln!("Error: Could not determine database path for query execution.");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let conn = match claude_history_store::db::init_db(&db_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: Failed to open database: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
+            conn.call(move |conn| {
+                claude_history_store::sql_passthrough::execute_sql(conn, &sql, &positional_params)
+                    .map_err(|e| {
+                        tokio_rusqlite::rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })
+            })
+            .await
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            conn.call(move |conn| {
+                claude_history_store::sql_passthrough::execute_sql(conn, &sql, &positional_params)
+                    .map_err(|e| {
+                        tokio_rusqlite::rusqlite::Error::ToSqlConversionFailure(
+                            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                        )
+                    })
+            })
+            .await
+        }
+    };
+
+    match results {
+        Ok(rows) => {
+            eprintln!("{} row(s) returned", rows.len());
+            if json || true {
+                // Default to JSON output for query run (consistent with sql passthrough)
+                if output::print_json(&rows).is_err() {
+                    return ExitCode::FAILURE;
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Error: Query execution failed: {}", e);
+            ExitCode::FAILURE
+        }
+    }
 }

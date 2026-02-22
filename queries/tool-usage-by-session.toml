@@ -1,0 +1,5 @@
+description = "Show tool usage breakdown for a specific session"
+
+[[params]]
+name = "session_id"
+description = "Session ID to analyze"
