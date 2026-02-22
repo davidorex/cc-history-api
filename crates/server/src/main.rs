@@ -310,9 +310,14 @@ const QUERIES_SCHEMA_HELP: &str = r#"DATABASE SCHEMA:
     v_tool_errors                 Tool error patterns with session/project context
     v_session_cost                Session cost: tokens, cache, file ops, git ops
 
-  FTS (full-text search):
+  FTS (full-text search — use MATCH, not LIKE):
     fts_message_content           FTS5 on message_content.text_content
     fts_file_operations           FTS5 on file_operations content, old_content, command
+
+    Query:   WHERE fts_message_content MATCH :query
+    Syntax:  AND, OR, NOT, "phrase match", prefix*
+    Ranking: ORDER BY bm25(fts_message_content)  — lower = better match
+    Join:    FROM fts_message_content fts JOIN message_content mc ON fts.rowid = mc.rowid
 
   Key relationships:
     sessions.session_id  →  messages, files, file_operations, git_operations, agents
