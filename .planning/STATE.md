@@ -11,7 +11,13 @@ See: .planning/PROJECT.md (updated 2026-02-21)
 
 Milestone: v1.0 MVP -- SHIPPED 2026-02-21
 Status: All 6 phases complete. 27 plans executed. 102 requirements delivered. Milestone archived.
-Last activity: 2026-02-21 -- v1.0 milestone completion
+Last activity: 2026-02-22 -- Completed quick task 001 (queries CLI subcommand)
+
+### Quick Tasks
+
+| ID  | Name                              | Status   | Duration | Commit  |
+|-----|-----------------------------------|----------|----------|---------|
+| 001 | Add queries CLI subcommand (list/show/run) | Complete | 6 min | 16a252b |
 
 ## Performance Metrics
 
@@ -31,8 +37,16 @@ Last activity: 2026-02-21 -- v1.0 milestone completion
 | 05 | 8/8 | 25 min | 3.1 min |
 | 06 | 4/4 | ~14 min | ~3.5 min |
 
+## Decisions
+
+| Decision | Context | Date |
+|----------|---------|------|
+| Queries list/show routed without DB connection | Only run needs ConnectionMode; list/show are filesystem-only | 2026-02-22 |
+| Query run output always JSON | Consistent with sql_passthrough behavior | 2026-02-22 |
+| .sql+.toml sidecar pattern for query metadata | Auto-discovers params from SQL when no sidecar present | 2026-02-22 |
+
 ## Session Continuity
 
-Last session: 2026-02-21
-Stopped at: v1.0 milestone shipped.
-Resume file: N/A -- milestone complete.
+Last session: 2026-02-22
+Stopped at: Quick task 001 complete.
+Resume file: N/A
