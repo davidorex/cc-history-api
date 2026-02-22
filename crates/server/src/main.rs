@@ -234,6 +234,7 @@ enum Commands {
         json: bool,
     },
     /// Manage and run canned SQL queries
+    #[command(after_long_help = QUERIES_SCHEMA_HELP)]
     Queries {
         #[command(subcommand)]
         action: QueriesAction,
@@ -281,6 +282,62 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
+
+/// Schema reference for `queries --help`. Gives LLMs and humans the information
+/// needed to author new canned queries without reading migration files.
+const QUERIES_SCHEMA_HELP: &str = r#"DATABASE SCHEMA:
+
+  Tables:
+    sessions          session_id*, project_path, first_seen_at, last_seen_at, version, slug, git_branch
+    messages          uuid*, session_id→sessions, type, timestamp, parent_uuid, model, stop_reason, is_compact_summary, agent_id, subtype
+    message_content   id*, message_uuid→messages, block_index, block_type(text|thinking|tool_use|tool_result), text_content, tool_name, tool_input
+    token_usage       message_uuid*→messages, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+    tool_executions   id*, message_uuid→messages, tool_use_id, tool_name, input_json, result_content, is_error
+    files             id*, session_id→sessions, file_path, first_seen, last_modified, operation_count
+    file_operations   id*, session_id→sessions, file_path, operation_type(write|edit|read|bash_*), content, old_content, command, message_uuid→messages, timestamp, result_summary, is_error
+    git_operations    id*, session_id→sessions, operation_type(commit|push|checkout|...), command, commit_message, branch, message_uuid→messages, timestamp, result_summary, is_error
+    projects          project_path*, display_name, first_seen, last_seen, session_count
+    agents            agent_id*, session_id→sessions, first_seen_at, last_seen_at
+    version_history   version*, first_seen_at, last_seen_at, session_count, new_fields_count
+    schema_drift_log  id*, field_name, record_type, version, sample_value, first_seen_at, occurrence_count, last_seen_at
+
+  Views (prebuilt cross-domain queries):
+    v_file_token_cost             Per-file token cost by project, file, operation_type
+    v_file_conversation_context   Assistant reasoning within 60s before file write/edit
+    v_project_summary             Project stats: sessions, messages, tokens, file/git ops
+    v_file_provenance             Complete file operation history across sessions
+    v_git_commit_context          Commit messages with assistant reasoning within 120s
+    v_tool_errors                 Tool error patterns with session/project context
+    v_session_cost                Session cost: tokens, cache, file ops, git ops
+
+  FTS (full-text search):
+    fts_message_content           FTS5 on message_content.text_content
+    fts_file_operations           FTS5 on file_operations content, old_content, command
+
+  Key relationships:
+    sessions.session_id  →  messages, files, file_operations, git_operations, agents
+    messages.uuid        →  message_content, token_usage, tool_executions
+    messages.uuid        →  file_operations.message_uuid, git_operations.message_uuid
+
+  Timestamps are stored as UTC ISO 8601 strings. CLI display converts to local time.
+
+AUTHORING QUERIES:
+
+  Queries are .sql files in ~/.claude/claude-history/queries/ (override with $CLAUDE_HISTORY_QUERIES).
+  Use :param_name for parameters. Optional .toml sidecar for metadata:
+
+    description = "What this query does"
+    [[params]]
+    name = "project"
+    description = "Project path substring"
+    [[params]]
+    name = "limit"
+    description = "Max results"
+    default = "10"
+    type = "integer"       # text (default), integer, or real
+
+  Param types control SQLite binding: integer/real bind as numbers, text as strings.
+  Without type hints, use CAST(:param AS INTEGER) for numeric comparisons."#;
 
 /// Resolve the database file path.
 ///

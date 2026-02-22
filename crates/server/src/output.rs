@@ -9,11 +9,27 @@
 //! - Human-readable: formatted columns and section headers (default)
 //! - JSON: `--json` flag triggers machine-readable output via `print_json`
 
+use chrono::{DateTime, Local, Utc};
 use claude_history_store::artifact_queries::{FileEntry, FileOperation, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{
     ModelStats, SessionSummary, TokenStats, ToolStats, VersionDriftGroup, VersionHistoryEntry,
 };
+
+/// Convert a UTC timestamp string to local time for display.
+///
+/// Attempts to parse ISO 8601 / RFC 3339 timestamps (the format stored in the
+/// database, originating from Claude Code's JSONL). On parse failure, returns
+/// the original string unchanged — avoids panicking on unexpected formats.
+///
+/// Output format: "2026-02-22 20:18:19" (local time, no timezone suffix,
+/// compact enough for column-aligned tables).
+fn to_local(utc_str: &str) -> String {
+    utc_str
+        .parse::<DateTime<Utc>>()
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| utc_str.to_string())
+}
 
 /// Print search results in human-readable format.
 ///
@@ -37,7 +53,7 @@ pub fn print_search_results(results: &[SearchResult]) {
         };
         println!(
             "{} | {} | {} | {}",
-            sid_short, r.timestamp, r.message_type, r.block_type
+            sid_short, to_local(&r.timestamp), r.message_type, r.block_type
         );
         println!("  {}", r.snippet);
     }
@@ -81,11 +97,12 @@ pub fn print_sessions_table(sessions: &[SessionSummary]) {
         } else {
             project.to_string()
         };
-        let date = s.first_seen_at.as_deref().unwrap_or("-");
-        let date_display = if date.len() > 20 {
-            &date[..20]
+        let date_raw = s.first_seen_at.as_deref().unwrap_or("-");
+        let date_local = to_local(date_raw);
+        let date_display = if date_local.len() > 20 {
+            &date_local[..20]
         } else {
-            date
+            &date_local
         };
         let model = s.model.as_deref().unwrap_or("-");
         let model_display = if model.len() > 20 {
@@ -219,10 +236,11 @@ pub fn print_files_table(files: &[FileEntry]) {
         } else {
             &f.session_id
         };
-        let modified_display = if f.last_modified.len() > 24 {
-            &f.last_modified[..24]
+        let modified_local = to_local(&f.last_modified);
+        let modified_display = if modified_local.len() > 24 {
+            &modified_local[..24]
         } else {
-            &f.last_modified
+            &modified_local
         };
 
         println!(
@@ -255,10 +273,11 @@ pub fn print_file_operations(ops: &[FileOperation]) {
     );
 
     for op in ops {
-        let ts_display = if op.timestamp.len() > 24 {
-            &op.timestamp[..24]
+        let ts_local = to_local(&op.timestamp);
+        let ts_display = if ts_local.len() > 24 {
+            &ts_local[..24]
         } else {
-            &op.timestamp
+            &ts_local
         };
         let type_display = if op.operation_type.len() > 10 {
             &op.operation_type[..10]
@@ -315,10 +334,11 @@ pub fn print_git_operations(ops: &[GitOperation]) {
     );
 
     for op in ops {
-        let ts_display = if op.timestamp.len() > 24 {
-            &op.timestamp[..24]
+        let ts_local = to_local(&op.timestamp);
+        let ts_display = if ts_local.len() > 24 {
+            &ts_local[..24]
         } else {
-            &op.timestamp
+            &ts_local
         };
         let type_display = if op.operation_type.len() > 10 {
             &op.operation_type[..10]
@@ -391,15 +411,17 @@ pub fn print_version_history(entries: &[VersionHistoryEntry]) {
         } else {
             &entry.version
         };
-        let first_display = if entry.first_seen_at.len() > 24 {
-            &entry.first_seen_at[..24]
+        let first_local = to_local(&entry.first_seen_at);
+        let first_display = if first_local.len() > 24 {
+            &first_local[..24]
         } else {
-            &entry.first_seen_at
+            &first_local
         };
-        let last_display = if entry.last_seen_at.len() > 24 {
-            &entry.last_seen_at[..24]
+        let last_local = to_local(&entry.last_seen_at);
+        let last_display = if last_local.len() > 24 {
+            &last_local[..24]
         } else {
-            &entry.last_seen_at
+            &last_local
         };
         println!(
             "{:<30}  {:<24}  {:<24}  {:>8}  {:>10}",
