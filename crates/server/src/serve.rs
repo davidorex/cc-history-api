@@ -74,7 +74,9 @@ pub async fn run_server(
     socket_path: PathBuf,
     projects_dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let app = api::build_router(state.clone());
+    let mcp_service = crate::mcp::build_streamable_http_service(state.clone());
+    let app = api::build_router(state.clone())
+        .nest_service("/mcp", mcp_service);
     let token = CancellationToken::new();
 
     // --- File watcher for live JSONL ingestion ---

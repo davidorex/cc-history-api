@@ -25,6 +25,7 @@
 //!   claude-history queries list [--json] [--queries-dir <path>]
 //!   claude-history queries show <name> [--queries-dir <path>]
 //!   claude-history queries run <name> [--param key=value]... [--json] [--queries-dir <path>]
+//!   claude-history mcp-stdio
 //!
 //! All subcommands share a global --db-path option. Logs go to stderr,
 //! structured output to stdout (PAT-020).
@@ -41,6 +42,7 @@ mod api;
 pub mod daemon_client;
 pub mod events;
 mod export;
+pub mod mcp;
 mod output;
 mod serve;
 mod state;
@@ -239,6 +241,32 @@ enum Commands {
         #[command(subcommand)]
         action: QueriesAction,
     },
+    /// Run as MCP server over stdin/stdout (for Claude Desktop integration)
+    McpStdio,
+    /// Print MCP client configuration snippets for connecting to claude-history
+    McpConfig {
+        /// Which client to generate config for
+        #[arg(value_enum, default_value = "all")]
+        client: McpClient,
+    },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum McpClient {
+    /// Show all client configurations
+    All,
+    /// Claude Code (.mcp.json or `claude mcp add`)
+    ClaudeCode,
+    /// Claude Desktop (claude_desktop_config.json)
+    ClaudeDesktop,
+    /// Cursor (.cursor/mcp.json)
+    Cursor,
+    /// VS Code / GitHub Copilot (.vscode/mcp.json)
+    Vscode,
+    /// Windsurf / Codeium (~/.codeium/windsurf/mcp_config.json)
+    Windsurf,
+    /// Zed (~/.config/zed/settings.json)
+    Zed,
 }
 
 #[derive(Subcommand)]
@@ -450,6 +478,15 @@ async fn main() -> ExitCode {
         // Queries subcommand: list/show are filesystem-only, run needs DB.
         Commands::Queries { action } => run_queries(action, cli.db_path).await,
 
+        // MCP stdio: opens DB directly and serves MCP protocol on stdin/stdout.
+        Commands::McpStdio => run_mcp_stdio(cli.db_path).await,
+
+        // MCP config: print client configuration snippets (no DB needed).
+        Commands::McpConfig { client } => {
+            print_mcp_config(client);
+            ExitCode::SUCCESS
+        }
+
         // All read-only subcommands: detect daemon vs direct DB once at startup.
         read_cmd => {
             let mode = match resolve_connection_mode(cli.db_path).await {
@@ -516,8 +553,8 @@ async fn main() -> ExitCode {
                 Commands::Artifacts { session_id, json } => {
                     run_artifacts(mode, session_id, json).await
                 }
-                // Serve, Sync, and Queries already handled above.
-                Commands::Serve { .. } | Commands::Sync { .. } | Commands::Queries { .. } => unreachable!(),
+                // Serve, Sync, Queries, McpStdio, and McpConfig already handled above.
+                Commands::Serve { .. } | Commands::Sync { .. } | Commands::Queries { .. } | Commands::McpStdio | Commands::McpConfig { .. } => unreachable!(),
             }
         }
     }
@@ -1760,6 +1797,201 @@ async fn run_queries_run(
         }
         Err(e) => {
             eprintln!("Error: Query execution failed: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print MCP client configuration snippets.
+///
+/// Generates ready-to-use JSON configuration for each supported MCP client,
+/// resolving the actual binary path at runtime. Clients differ in their config
+/// structure: VS Code uses `servers` (not `mcpServers`), Zed uses
+/// `context_servers` with nested `command`, and Claude Code supports both
+/// stdio and HTTP transports.
+fn print_mcp_config(client: McpClient) {
+    // Resolve the binary path for config snippets. Prefer the actual executable
+    // path over just "claude-history" so configs work without PATH adjustments.
+    let binary = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "claude-history".to_string());
+
+    match client {
+        McpClient::All => {
+            print_config_claude_code(&binary);
+            println!();
+            print_config_claude_desktop(&binary);
+            println!();
+            print_config_cursor(&binary);
+            println!();
+            print_config_vscode(&binary);
+            println!();
+            print_config_windsurf(&binary);
+            println!();
+            print_config_zed(&binary);
+        }
+        McpClient::ClaudeCode => print_config_claude_code(&binary),
+        McpClient::ClaudeDesktop => print_config_claude_desktop(&binary),
+        McpClient::Cursor => print_config_cursor(&binary),
+        McpClient::Vscode => print_config_vscode(&binary),
+        McpClient::Windsurf => print_config_windsurf(&binary),
+        McpClient::Zed => print_config_zed(&binary),
+    }
+}
+
+fn print_config_claude_code(binary: &str) {
+    println!("# Claude Code");
+    println!("# Add to .mcp.json (project) or ~/.claude/.mcp.json (global)");
+    println!("# Or run: claude mcp add claude-history -- {} mcp-stdio", binary);
+    println!();
+    println!("# Option 1: stdio transport");
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "claude-history": {
+                "type": "stdio",
+                "command": binary,
+                "args": ["mcp-stdio"]
+            }
+        }
+    })).unwrap());
+    println!();
+    println!("# Option 2: HTTP transport (requires daemon running)");
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "claude-history": {
+                "type": "http",
+                "url": "http://127.0.0.1:7424/mcp"
+            }
+        }
+    })).unwrap());
+}
+
+fn print_config_claude_desktop(binary: &str) {
+    println!("# Claude Desktop");
+    println!("# Add to ~/Library/Application Support/Claude/claude_desktop_config.json");
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "claude-history": {
+                "command": binary,
+                "args": ["mcp-stdio"]
+            }
+        }
+    })).unwrap());
+}
+
+fn print_config_cursor(binary: &str) {
+    println!("# Cursor");
+    println!("# Add to .cursor/mcp.json in your project root");
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "claude-history": {
+                "command": binary,
+                "args": ["mcp-stdio"]
+            }
+        }
+    })).unwrap());
+}
+
+fn print_config_vscode(binary: &str) {
+    println!("# VS Code / GitHub Copilot");
+    println!("# Add to .vscode/mcp.json in your project root");
+    println!("# Note: VS Code uses \"servers\" (not \"mcpServers\")");
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "servers": {
+            "claude-history": {
+                "type": "stdio",
+                "command": binary,
+                "args": ["mcp-stdio"]
+            }
+        }
+    })).unwrap());
+}
+
+fn print_config_windsurf(binary: &str) {
+    println!("# Windsurf / Codeium");
+    println!("# Add to ~/.codeium/windsurf/mcp_config.json");
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "claude-history": {
+                "command": binary,
+                "args": ["mcp-stdio"]
+            }
+        }
+    })).unwrap());
+}
+
+fn print_config_zed(binary: &str) {
+    println!("# Zed");
+    println!("# Add to ~/.config/zed/settings.json");
+    println!("# Note: Zed uses \"context_servers\" with nested \"command\" structure");
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "context_servers": {
+            "claude-history": {
+                "command": {
+                    "path": binary,
+                    "args": ["mcp-stdio"]
+                }
+            }
+        }
+    })).unwrap());
+}
+
+/// Run as an MCP server over stdin/stdout.
+///
+/// Opens the database directly (no daemon needed), builds the McpService with
+/// shared state, and serves the MCP protocol over stdin/stdout using rmcp's
+/// stdio transport. Designed for Claude Desktop integration.
+async fn run_mcp_stdio(db_path_arg: Option<PathBuf>) -> ExitCode {
+    let db_path = match resolve_db_path(db_path_arg) {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: Could not determine database path.");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !db_path.exists() {
+        eprintln!(
+            "Error: Database file does not exist: {}\n\
+             Run `claude-history sync` first to create the database.",
+            db_path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let conn = match claude_history_store::db::init_db(&db_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: Failed to open database: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Build minimal AppState (no SSE broadcast needed for stdio mode).
+    let (event_tx, _rx) = tokio::sync::broadcast::channel::<crate::events::SseEvent>(1);
+    let state = Arc::new(state::AppState {
+        conn,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        db_path,
+        event_tx,
+    });
+
+    let service = mcp::McpService::new(state);
+
+    // Serve MCP protocol over stdin/stdout.
+    let transport = rmcp::transport::io::stdio();
+    match rmcp::ServiceExt::serve(service, transport).await {
+        Ok(running) => {
+            if let Err(e) = running.waiting().await {
+                eprintln!("Error: MCP stdio service error: {}", e);
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to start MCP stdio service: {}", e);
             ExitCode::FAILURE
         }
     }

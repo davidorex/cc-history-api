@@ -30,3 +30,5 @@ similar = "2.7"
 glob = "0.3"
 regex = "1"
 toml = "0.8"
+rmcp = { version = "0.16", features = ["server", "transport-streamable-http-server", "transport-io"] }
+schemars = "1"

@@ -18,3 +18,13 @@ If seed queries in `queries/` were modified, copy them to `~/.claude/claude-hist
 ## Query Authoring
 
 Run `claude-history queries --help` for the full database schema, table/column reference, views, and TOML sidecar format.
+
+## MCP Server
+
+The daemon exposes an MCP endpoint at `/mcp` (streamable HTTP transport). For Claude Desktop or stdio-based MCP clients:
+
+```bash
+claude-history mcp-stdio
+```
+
+10 tools: search_messages, list_sessions, query_messages, list_files, file_history, git_log, get_stats, execute_sql, run_query, list_queries.
