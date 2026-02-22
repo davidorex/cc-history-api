@@ -5,6 +5,7 @@ pub mod decompose;
 pub mod drift;
 pub mod fts;
 pub mod query;
+pub mod query_registry;
 pub mod schema;
 pub mod sql_passthrough;
 pub mod sync;
