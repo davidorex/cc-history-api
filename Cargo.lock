@@ -309,6 +309,7 @@ dependencies = [
 name = "claude-history-store"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "claude-history-core",
  "glob",
  "regex",

@@ -48,6 +48,9 @@ Available tools:
 - execute_sql: Read-only SQL passthrough (any SELECT query)
 - run_query: Execute named canned queries with parameter binding
 - list_queries: Discover available canned queries
+- list_bookmarks: List bookmarks from ClaudeHistoryBrowser (separate database, survives rebuilds)
+- search_bookmarks: Search bookmarks by label or tag text
+- get_bookmark: Retrieve a single bookmark by ID or assistant message UUID
 
 For execute_sql, the database schema includes tables: sessions, messages, \
 message_content, token_usage, tool_executions, files, file_operations, \

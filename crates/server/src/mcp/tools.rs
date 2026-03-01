@@ -102,6 +102,34 @@ pub struct RunQueryParams {
     pub params: std::collections::HashMap<String, String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ListBookmarksParams {
+    /// Filter by project path (substring match) or encoded dir name. Omit for all projects.
+    pub project: Option<String>,
+    /// Maximum results to return (default 50)
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchBookmarksParams {
+    /// Search text matched against bookmark labels and tags
+    pub query: String,
+    /// Filter by project path (substring match) or encoded dir name. Omit for all projects.
+    pub project: Option<String>,
+    /// Maximum results to return (default 50)
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetBookmarkParams {
+    /// Bookmark UUID
+    pub id: Option<String>,
+    /// Assistant message UUID
+    pub assistant_uuid: Option<String>,
+    /// Project scope (recommended when using assistant_uuid)
+    pub project: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // McpService
 // ---------------------------------------------------------------------------
@@ -386,5 +414,64 @@ impl McpService {
             queries.values().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
         json_result(&list)
+    }
+
+    #[tool(description = "List bookmarks from ClaudeHistoryBrowser, sorted by creation date (newest first). Bookmarks are stored in a separate database and survive session history rebuilds.")]
+    async fn list_bookmarks(
+        &self,
+        Parameters(params): Parameters<ListBookmarksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let project = params.project;
+        let limit = params.limit.unwrap_or(50);
+        let results = tokio::task::spawn_blocking(move || {
+            claude_history_store::bookmarks::list_bookmarks(project.as_deref(), limit)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task join error: {e}"), None))?
+        .map_err(db_error)?;
+        json_result(&results)
+    }
+
+    #[tool(description = "Search bookmarks by label or tag text (substring match). Bookmarks are stored in a separate database and survive session history rebuilds.")]
+    async fn search_bookmarks(
+        &self,
+        Parameters(params): Parameters<SearchBookmarksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let query = params.query;
+        let project = params.project;
+        let limit = params.limit.unwrap_or(50);
+        let results = tokio::task::spawn_blocking(move || {
+            claude_history_store::bookmarks::search_bookmarks(&query, project.as_deref(), limit)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task join error: {e}"), None))?
+        .map_err(db_error)?;
+        json_result(&results)
+    }
+
+    #[tool(description = "Retrieve a single bookmark by its ID or by assistant message UUID. At least one of 'id' or 'assistant_uuid' must be provided.")]
+    async fn get_bookmark(
+        &self,
+        Parameters(params): Parameters<GetBookmarkParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = params.id;
+        let assistant_uuid = params.assistant_uuid;
+        let project = params.project;
+        let result = tokio::task::spawn_blocking(move || {
+            claude_history_store::bookmarks::get_bookmark(
+                id.as_deref(),
+                assistant_uuid.as_deref(),
+                project.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task join error: {e}"), None))?
+        .map_err(db_error)?;
+        match result {
+            Some(bookmark) => json_result(&bookmark),
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "No bookmark found matching the given criteria.",
+            )])),
+        }
     }
 }

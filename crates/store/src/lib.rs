@@ -1,5 +1,6 @@
 pub mod artifact_queries;
 pub mod artifacts;
+pub mod bookmarks;
 pub mod db;
 pub mod decompose;
 pub mod drift;
