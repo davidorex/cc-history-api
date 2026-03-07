@@ -116,6 +116,7 @@ pub fn list_files(
     conn: &Connection,
     session_id: Option<&str>,
     path_contains: Option<&str>,
+    project: Option<&str>,
     limit: usize,
 ) -> Result<Vec<FileEntry>, rusqlite::Error> {
     let mut conditions = Vec::new();
@@ -129,6 +130,16 @@ pub fn list_files(
         conditions.push(format!("f.file_path LIKE ?{}", param_values.len() + 1));
         param_values.push(Box::new(format!("%{}%", path)));
     }
+    if let Some(proj) = project {
+        conditions.push(format!("s.project_path LIKE ?{}", param_values.len() + 1));
+        param_values.push(Box::new(format!("%{}%", proj)));
+    }
+
+    let join_clause = if project.is_some() {
+        "JOIN sessions s ON s.session_id = f.session_id"
+    } else {
+        ""
+    };
 
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -137,11 +148,13 @@ pub fn list_files(
     };
 
     let sql = format!(
-        "SELECT id, session_id, file_path, first_seen, last_modified, operation_count
+        "SELECT f.id, f.session_id, f.file_path, f.first_seen, f.last_modified, f.operation_count
          FROM files f
+         {}
          {}
          ORDER BY f.last_modified DESC
          LIMIT ?{}",
+        join_clause,
         where_clause,
         param_values.len() + 1
     );
@@ -198,26 +211,41 @@ pub fn query_file_operations(
     conn: &Connection,
     file_path: &str,
     session_id: Option<&str>,
+    project: Option<&str>,
     limit: usize,
 ) -> Result<Vec<FileOperation>, rusqlite::Error> {
-    let mut conditions = vec!["fo.file_path = ?1".to_string()];
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-        vec![Box::new(file_path.to_string())];
+    let mut conditions = Vec::new();
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    conditions.push(format!("fo.file_path LIKE ?{}", param_values.len() + 1));
+    param_values.push(Box::new(format!("%{}%", file_path)));
 
     if let Some(sid) = session_id {
         conditions.push(format!("fo.session_id = ?{}", param_values.len() + 1));
         param_values.push(Box::new(sid.to_string()));
     }
+    if let Some(proj) = project {
+        conditions.push(format!("s.project_path LIKE ?{}", param_values.len() + 1));
+        param_values.push(Box::new(format!("%{}%", proj)));
+    }
+
+    let join_clause = if project.is_some() {
+        "JOIN sessions s ON s.session_id = fo.session_id"
+    } else {
+        ""
+    };
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     let sql = format!(
-        "SELECT id, session_id, file_path, operation_type, content, old_content,
-                command, tool_use_id, message_uuid, timestamp
+        "SELECT fo.id, fo.session_id, fo.file_path, fo.operation_type, fo.content, fo.old_content,
+                fo.command, fo.tool_use_id, fo.message_uuid, fo.timestamp
          FROM file_operations fo
+         {}
          {}
          ORDER BY fo.timestamp ASC
          LIMIT ?{}",
+        join_clause,
         where_clause,
         param_values.len() + 1
     );
@@ -548,7 +576,7 @@ pub fn query_session_artifacts(
     session_id: &str,
 ) -> Result<SessionArtifacts, rusqlite::Error> {
     // 1. Files for this session
-    let files = list_files(conn, Some(session_id), None, 10000)?;
+    let files = list_files(conn, Some(session_id), None, None, 10000)?;
 
     // 2. Git operations for this session
     let git_operations = list_git_operations(conn, Some(session_id), None, 10000)?;
@@ -810,13 +838,114 @@ mod tests {
         insert_file(&conn, "sess-lf", "/src/main.rs", 5);
         insert_file(&conn, "sess-lf", "/src/lib.rs", 3);
 
-        let files = list_files(&conn, Some("sess-lf"), None, 100).unwrap();
+        let files = list_files(&conn, Some("sess-lf"), None, None, 100).unwrap();
         assert_eq!(files.len(), 2, "Should return 2 file entries");
 
         // Verify path_contains filter
-        let filtered = list_files(&conn, Some("sess-lf"), Some("main"), 100).unwrap();
+        let filtered = list_files(&conn, Some("sess-lf"), Some("main"), None, 100).unwrap();
         assert_eq!(filtered.len(), 1, "Path filter should match 1 file");
         assert_eq!(filtered[0].file_path, "/src/main.rs");
+    }
+
+    // -------------------------------------------------------------------
+    // Test 1b: list_files with project filter
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_list_files_with_project_filter() {
+        let conn = setup_db();
+        // Insert two sessions with different project paths
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at, version, slug, git_branch)
+             VALUES ('sess-pA', '/home/user/projectA', '2026-02-20T00:00:00Z', '2.1.49', 'pA', 'main')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at, version, slug, git_branch)
+             VALUES ('sess-pB', '/home/user/projectB', '2026-02-20T00:00:00Z', '2.1.49', 'pB', 'main')",
+            [],
+        ).unwrap();
+
+        insert_file(&conn, "sess-pA", "/src/main.rs", 3);
+        insert_file(&conn, "sess-pB", "/src/main.rs", 2);
+
+        // Without project filter: both
+        let all = list_files(&conn, None, Some("main.rs"), None, 100).unwrap();
+        assert_eq!(all.len(), 2, "Should return files from both projects");
+
+        // With project filter: only projectA
+        let filtered = list_files(&conn, None, Some("main.rs"), Some("projectA"), 100).unwrap();
+        assert_eq!(filtered.len(), 1, "Project filter should narrow to 1 file");
+        assert_eq!(filtered[0].session_id, "sess-pA");
+    }
+
+    // -------------------------------------------------------------------
+    // Test 1c: query_file_operations substring match
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_query_file_operations_substring_match() {
+        let conn = setup_db();
+        insert_test_session(&conn, "sess-sub");
+        insert_test_message(&conn, "msg-sub-1", "sess-sub", "2026-02-20T01:00:00Z");
+
+        insert_file_op(
+            &conn, "sess-sub", "/src/main.rs", "write",
+            Some("content"), None,
+            "tool-sub-001", "msg-sub-1", "2026-02-20T01:00:00Z",
+        );
+        insert_file_op(
+            &conn, "sess-sub", "/src/lib.rs", "write",
+            Some("content"), None,
+            "tool-sub-002", "msg-sub-1", "2026-02-20T01:00:01Z",
+        );
+
+        // Substring "main" should match only main.rs
+        let ops = query_file_operations(&conn, "main", None, None, 100).unwrap();
+        assert_eq!(ops.len(), 1, "Substring 'main' should match 1 file");
+        assert_eq!(ops[0].file_path, "/src/main.rs");
+
+        // Substring "src" should match both
+        let ops_both = query_file_operations(&conn, "src", None, None, 100).unwrap();
+        assert_eq!(ops_both.len(), 2, "Substring 'src' should match 2 files");
+    }
+
+    // -------------------------------------------------------------------
+    // Test 1d: query_file_operations with project filter
+    // -------------------------------------------------------------------
+    #[test]
+    fn test_query_file_operations_with_project_filter() {
+        let conn = setup_db();
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at, version, slug, git_branch)
+             VALUES ('sess-fopA', '/home/user/projectA', '2026-02-20T00:00:00Z', '2.1.49', 'pA', 'main')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at, version, slug, git_branch)
+             VALUES ('sess-fopB', '/home/user/projectB', '2026-02-20T00:00:00Z', '2.1.49', 'pB', 'main')",
+            [],
+        ).unwrap();
+        insert_test_message(&conn, "msg-fopA", "sess-fopA", "2026-02-20T01:00:00Z");
+        insert_test_message(&conn, "msg-fopB", "sess-fopB", "2026-02-20T01:00:00Z");
+
+        insert_file_op(
+            &conn, "sess-fopA", "/src/main.rs", "write",
+            Some("a"), None,
+            "tool-fopA-001", "msg-fopA", "2026-02-20T01:00:00Z",
+        );
+        insert_file_op(
+            &conn, "sess-fopB", "/src/main.rs", "write",
+            Some("b"), None,
+            "tool-fopB-001", "msg-fopB", "2026-02-20T01:00:01Z",
+        );
+
+        // Without project: both
+        let all = query_file_operations(&conn, "main.rs", None, None, 100).unwrap();
+        assert_eq!(all.len(), 2, "Should return ops from both projects");
+
+        // With project filter: only projectA
+        let filtered = query_file_operations(&conn, "main.rs", None, Some("projectA"), 100).unwrap();
+        assert_eq!(filtered.len(), 1, "Project filter should narrow to 1 op");
+        assert_eq!(filtered[0].session_id, "sess-fopA");
     }
 
     // -------------------------------------------------------------------

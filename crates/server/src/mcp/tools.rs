@@ -60,6 +60,8 @@ pub struct ListFilesParams {
     pub session_id: Option<String>,
     /// Filter by path substring
     pub path: Option<String>,
+    /// Filter by project path (substring match)
+    pub project: Option<String>,
     /// Maximum results
     pub limit: Option<usize>,
 }
@@ -70,6 +72,8 @@ pub struct FileHistoryParams {
     pub path: String,
     /// Filter by session ID
     pub session_id: Option<String>,
+    /// Filter by project path (substring match)
+    pub project: Option<String>,
     /// Maximum operations to show
     pub limit: Option<usize>,
 }
@@ -250,6 +254,7 @@ impl McpService {
         let limit = params.limit.unwrap_or(100);
         let session_id = params.session_id;
         let path = params.path;
+        let project = params.project;
         let results = self
             .state
             .conn
@@ -258,6 +263,7 @@ impl McpService {
                     conn,
                     session_id.as_deref(),
                     path.as_deref(),
+                    project.as_deref(),
                     limit,
                 )
             })
@@ -274,6 +280,7 @@ impl McpService {
         let limit = params.limit.unwrap_or(50);
         let path = params.path;
         let session_id = params.session_id;
+        let project = params.project;
         let results = self
             .state
             .conn
@@ -282,6 +289,7 @@ impl McpService {
                     conn,
                     &path,
                     session_id.as_deref(),
+                    project.as_deref(),
                     limit,
                 )
             })

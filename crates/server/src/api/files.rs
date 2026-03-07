@@ -37,6 +37,8 @@ pub struct FilesParams {
     pub session_id: Option<String>,
     /// Filter by file path substring match.
     pub path: Option<String>,
+    /// Filter by project path substring match.
+    pub project: Option<String>,
     /// Maximum files to return. Defaults to 100.
     pub limit: Option<usize>,
 }
@@ -98,6 +100,7 @@ pub async fn list_files(
                 conn,
                 params.session_id.as_deref(),
                 params.path.as_deref(),
+                params.project.as_deref(),
                 limit,
             )
         })
@@ -124,6 +127,7 @@ pub async fn file_detail(
                         conn,
                         &f.file_path,
                         Some(&f.session_id),
+                        None,
                         1000,
                     )?;
                     Ok(Some(FileDetailResponse {
@@ -265,6 +269,7 @@ pub async fn query_files(
                 conn,
                 body.session_id.as_deref(),
                 None, // no substring filter; glob filtering done in Rust below
+                None, // no project filter for glob endpoint
                 10000, // fetch a generous set for glob filtering
             )
         })

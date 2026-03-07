@@ -443,6 +443,7 @@ impl DaemonClient {
         &self,
         session_id: Option<&str>,
         path: Option<&str>,
+        project: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<FileEntry>, DaemonError> {
         let mut params = Vec::new();
@@ -451,6 +452,9 @@ impl DaemonClient {
         }
         if let Some(p) = path {
             params.push(format!("path={}", urlencoded(p)));
+        }
+        if let Some(proj) = project {
+            params.push(format!("project={}", urlencoded(proj)));
         }
         if let Some(l) = limit {
             params.push(format!("limit={}", l));

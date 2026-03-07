@@ -180,6 +180,9 @@ enum Commands {
         /// Filter by path substring
         #[arg(long)]
         path: Option<String>,
+        /// Filter by project path substring
+        #[arg(long)]
+        project: Option<String>,
         /// Maximum results
         #[arg(long, default_value = "100")]
         limit: usize,
@@ -194,6 +197,9 @@ enum Commands {
         /// Filter by session ID
         #[arg(long)]
         session_id: Option<String>,
+        /// Filter by project path substring
+        #[arg(long)]
+        project: Option<String>,
         /// Maximum operations to show
         #[arg(long, default_value = "50")]
         limit: usize,
@@ -530,15 +536,17 @@ async fn main() -> ExitCode {
                 Commands::Files {
                     session_id,
                     path,
+                    project,
                     limit,
                     json,
-                } => run_files(mode, session_id, path, limit, json).await,
+                } => run_files(mode, session_id, path, project, limit, json).await,
                 Commands::FileHistory {
                     path,
                     session_id,
+                    project,
                     limit,
                     json,
-                } => run_file_history(mode, path, session_id, limit, json).await,
+                } => run_file_history(mode, path, session_id, project, limit, json).await,
                 Commands::Reconstruct {
                     path,
                     session_id,
@@ -1262,6 +1270,7 @@ async fn run_files(
     mode: ConnectionMode,
     session_id: Option<String>,
     path: Option<String>,
+    project: Option<String>,
     limit: usize,
     json: bool,
 ) -> ExitCode {
@@ -1272,7 +1281,7 @@ async fn run_files(
                 "Routing files through daemon"
             );
             match client
-                .files(session_id.as_deref(), path.as_deref(), Some(limit))
+                .files(session_id.as_deref(), path.as_deref(), project.as_deref(), Some(limit))
                 .await
             {
                 Ok(r) => r,
@@ -1289,6 +1298,7 @@ async fn run_files(
                         conn,
                         session_id.as_deref(),
                         path.as_deref(),
+                        project.as_deref(),
                         limit,
                     )
                 })
@@ -1325,6 +1335,7 @@ async fn run_file_history(
     mode: ConnectionMode,
     path: String,
     session_id: Option<String>,
+    project: Option<String>,
     limit: usize,
     json: bool,
 ) -> ExitCode {
@@ -1358,6 +1369,7 @@ async fn run_file_history(
                 conn,
                 &p,
                 session_id.as_deref(),
+                project.as_deref(),
                 limit,
             )
         })
