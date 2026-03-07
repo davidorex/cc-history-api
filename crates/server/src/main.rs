@@ -51,7 +51,7 @@ mod watcher;
 use daemon_client::{ConnectionMode, detect_connection_mode, resolve_socket_path};
 
 #[derive(Parser)]
-#[command(name = "claude-history", about = "Claude Code session history API")]
+#[command(name = "claude-history", about = "Claude Code session history API", after_long_help = MAIN_HELP)]
 struct Cli {
     /// Path to the database file.
     /// Defaults to $CLAUDE_HISTORY_DB_PATH or ~/.claude/.claude-history.db
@@ -85,6 +85,7 @@ enum Commands {
         projects_dir: Option<PathBuf>,
     },
     /// Search message content using full-text search
+    #[command(after_long_help = SEARCH_HELP)]
     Search {
         /// Search query (FTS5 phrase matching)
         query: String,
@@ -96,6 +97,7 @@ enum Commands {
         json: bool,
     },
     /// List sessions with optional filters
+    #[command(after_long_help = SESSIONS_HELP)]
     Sessions {
         /// Filter by project path (substring match)
         #[arg(long)]
@@ -147,6 +149,7 @@ enum Commands {
         json: bool,
     },
     /// Export a complete session conversation
+    #[command(after_long_help = EXPORT_HELP)]
     Export {
         /// Session ID to export
         session_id: String,
@@ -173,6 +176,7 @@ enum Commands {
         json: bool,
     },
     /// List files touched by Claude Code across sessions
+    #[command(after_long_help = FILES_HELP)]
     Files {
         /// Filter by session ID
         #[arg(long)]
@@ -191,6 +195,7 @@ enum Commands {
         json: bool,
     },
     /// Show chronological operations on a file
+    #[command(after_long_help = FILE_HISTORY_HELP)]
     FileHistory {
         /// File path to show history for
         path: String,
@@ -208,6 +213,7 @@ enum Commands {
         json: bool,
     },
     /// Reconstruct file content at a point in time
+    #[command(after_long_help = RECONSTRUCT_HELP)]
     Reconstruct {
         /// File path to reconstruct
         path: String,
@@ -219,6 +225,7 @@ enum Commands {
         at: Option<String>,
     },
     /// Show git operations extracted from Bash tool calls
+    #[command(after_long_help = GIT_LOG_HELP)]
     GitLog {
         /// Filter by session ID
         #[arg(long)]
@@ -248,6 +255,7 @@ enum Commands {
         action: QueriesAction,
     },
     /// Run as MCP server over stdin/stdout (for Claude Desktop integration)
+    #[command(after_long_help = MCP_STDIO_HELP)]
     McpStdio,
     /// Print MCP client configuration snippets for connecting to claude-history
     McpConfig {
@@ -319,6 +327,218 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
 
 /// Schema reference for `queries --help`. Gives LLMs and humans the information
 /// needed to author new canned queries without reading migration files.
+const SEARCH_HELP: &str = r#"FTS5 QUERY SYNTAX:
+
+  Uses SQLite FTS5 full-text search. Supports:
+    AND, OR, NOT     Boolean operators (implicit AND between terms)
+    "quoted phrase"   Exact phrase match
+    prefix*           Prefix matching (e.g. refact* matches refactor, refactoring)
+    -term             Exclude term (same as NOT)
+
+  Hyphenated terms must be quoted: '"gsd-tools"' not gsd-tools
+
+EXAMPLES:
+
+  claude-history search 'error handling'             # Both words (implicit AND)
+  claude-history search '"error handling"'           # Exact phrase
+  claude-history search 'tokio AND spawn'            # Explicit AND
+  claude-history search 'refactor OR restructure'    # Either word
+  claude-history search 'database NOT migration'     # Exclude
+  claude-history search 'deploy*'                    # Prefix match
+  claude-history search '"gsd-tools"'                # Hyphenated term
+  claude-history search 'error handling' --json      # Machine-readable output
+
+  Results are ranked by BM25 relevance (best matches first).
+  Searches across all message content: user prompts, assistant responses,
+  tool results, and thinking blocks."#;
+
+const SESSIONS_HELP: &str = r#"EXAMPLES:
+
+  claude-history sessions                                # Recent 50 sessions
+  claude-history sessions --project myproject            # Filter by project
+  claude-history sessions --after 2026-03-01             # Since a date
+  claude-history sessions --after 2026-03-01 --before 2026-03-08
+  claude-history sessions --project smak --limit 5 --json
+
+  Project filter is substring match: --project smak matches
+  /Users/david/Projects/smak, /tmp/smak-test, etc.
+
+  Session IDs from this output can be used with --session-id in other commands
+  to drill into a specific session's messages, files, git ops, or artifacts."#;
+
+const FILES_HELP: &str = r#"EXAMPLES:
+
+  claude-history files --project myproject               # All files in a project
+  claude-history files --path main.rs                    # Find main.rs across all projects
+  claude-history files --path Cargo.toml --project smak  # Scoped to one project
+  claude-history files --session-id abc123               # Files in one session
+  claude-history files --path .rs --limit 20 --json      # Rust files, JSON output
+
+  Path and project filters are substring matches (LIKE '%term%').
+  Results include operation_count showing how many read/write/edit ops
+  touched each file. Use file-history to drill into specific operations.
+
+WORKFLOW:
+
+  1. Find files:    claude-history files --project myproject --path config
+  2. See operations: claude-history file-history config.rs --project myproject
+  3. Reconstruct:   claude-history reconstruct /full/path/config.rs --session-id <id>"#;
+
+const FILE_HISTORY_HELP: &str = r#"EXAMPLES:
+
+  claude-history file-history main.rs                        # Partial path match
+  claude-history file-history main.rs --project myproject    # Scoped to project
+  claude-history file-history tools.rs --session-id abc123   # Scoped to session
+  claude-history file-history .rs --limit 100 --json         # All Rust file ops
+
+  The path argument is a substring match (LIKE '%path%'), not an exact path.
+  This means 'main.rs' matches /src/main.rs, /tests/main.rs, etc.
+  Use --project to narrow results to a specific project.
+
+  Operations returned: write (full file creation), edit (string replacement),
+  read (file was read), bash_cp, bash_mv, bash_rm, bash_mkdir, bash_touch.
+
+  Each operation includes session_id, timestamp, content (for writes),
+  old_content (for edits), and the message_uuid that triggered it."#;
+
+const GIT_LOG_HELP: &str = r#"EXAMPLES:
+
+  claude-history git-log                                     # Recent git ops
+  claude-history git-log --type commit                       # Only commits
+  claude-history git-log --type push                         # Only pushes
+  claude-history git-log --session-id abc123                  # One session
+  claude-history git-log --type commit --limit 10 --json     # JSON output
+
+  Operation types extracted from Bash commands: commit, push, pull, checkout,
+  branch, merge, rebase, stash, reset, diff, log, show, grep, tag, fetch, add.
+
+  Commit operations include the commit message and branch when detected."#;
+
+const RECONSTRUCT_HELP: &str = r#"Replays Write and Edit operations in timestamp order to reproduce file
+content at any point during a session.
+
+EXAMPLES:
+
+  claude-history reconstruct /src/main.rs --session-id abc123
+  claude-history reconstruct /src/main.rs --session-id abc123 --at <msg-uuid>
+
+  The --at flag stops reconstruction at a specific message, giving you the
+  file state at that point in the conversation. Without it, you get the final
+  state after all operations in the session.
+
+  The path must be the full absolute path as stored in the database.
+  Use `claude-history files --session-id <id>` to discover exact paths."#;
+
+const EXPORT_HELP: &str = r#"EXAMPLES:
+
+  claude-history export abc123                      # JSON (default)
+  claude-history export abc123 --format markdown    # Human-readable
+  claude-history export abc123 --format csv         # Spreadsheet-friendly
+
+  Exports the complete conversation: all messages with their content blocks,
+  tool calls, results, and metadata. Useful for archival, analysis, or
+  feeding into other tools.
+
+  Find session IDs with: claude-history sessions --project myproject"#;
+
+const MCP_STDIO_HELP: &str = r#"Runs claude-history as an MCP (Model Context Protocol) server communicating
+over stdin/stdout. This is how Claude Desktop and Claude Code connect.
+
+13 TOOLS AVAILABLE:
+
+  Discovery:
+    list_sessions     Browse sessions by project, date range
+    list_files        Find files by path substring and/or project
+    list_queries      Discover available canned SQL queries
+    list_bookmarks    Browse bookmarks from ClaudeHistoryBrowser
+    get_stats         Token usage, tool frequency, model breakdown
+
+  Deep queries:
+    search_messages   FTS5 full-text search across all message content
+    query_messages    Filter messages by session, type, model, tool, date
+    file_history      Chronological operations on a file (substring path match)
+    git_log           Git operations extracted from Bash tool calls
+    get_bookmark      Retrieve a bookmark by ID or assistant message UUID
+    search_bookmarks  Search bookmarks by label or tag text
+
+  Power tools:
+    execute_sql       Read-only SQL passthrough (any SELECT query)
+    run_query         Execute named canned queries with parameter binding
+
+CONFIGURATION:
+
+  For Claude Code (.mcp.json):
+    { "mcpServers": { "claude-history": { "command": "claude-history", "args": ["mcp-stdio"] } } }
+
+  For Claude Desktop (claude_desktop_config.json):
+    { "mcpServers": { "claude-history": { "command": "/path/to/claude-history", "args": ["mcp-stdio"] } } }
+
+  Or run: claude-history mcp-config"#;
+
+const MAIN_HELP: &str = r#"WHAT THIS IS:
+
+  claude-history ingests Claude Code JSONL session files into a normalized
+  SQLite database and serves them via CLI, HTTP API, and MCP tools.
+
+  It captures: conversations, tool calls, file operations (read/write/edit),
+  git operations, token usage, model info, and schema drift events.
+
+  Data source: ~/.claude/projects/<encoded-dir>/<session-id>/...jsonl
+
+DAEMON:
+
+  The daemon (`claude-history serve`) runs the file watcher for live ingestion
+  and serves the HTTP/UDS API. Without it, no new sessions are ingested.
+
+    claude-history serve &            # Start daemon (background)
+    pgrep -f 'claude-history serve'   # Check if running
+
+  On startup the daemon runs sync_all to catch up any sessions missed while
+  it was down. The file watcher then handles live ingestion going forward.
+
+DISCOVERY WORKFLOW:
+
+  1. Find sessions:
+       claude-history sessions --project myproject --limit 10
+
+  2. Search across all conversations:
+       claude-history search "error handling"
+       claude-history search '"exact phrase"'           # FTS5 phrase match
+       claude-history search 'tokio AND spawn'          # Boolean operators
+       claude-history search 'refactor*'                # Prefix match
+
+  3. Find files touched in a project:
+       claude-history files --project myproject --path main.rs
+
+  4. See what happened to a file:
+       claude-history file-history main.rs --project myproject
+
+  5. Reconstruct file content at a point in time:
+       claude-history reconstruct /path/to/file.rs --session-id <id>
+
+  6. See git operations:
+       claude-history git-log --type commit --limit 20
+
+  7. Run custom SQL:
+       claude-history queries run recent-sessions --param limit=5
+
+  8. Export a session:
+       claude-history export <session-id> --format markdown
+
+MCP TOOLS (13):
+
+  The same data is available via MCP for LLM tool use. Connect via:
+    - Streamable HTTP: http://127.0.0.1:7424/mcp (when daemon is running)
+    - Stdio: claude-history mcp-stdio (for Claude Desktop / Claude Code)
+
+  Run `claude-history mcp-config` for client configuration snippets.
+
+OUTPUT:
+
+  All subcommands default to human-readable table output. Add --json for
+  machine-readable JSON. Logs go to stderr, data to stdout.
+  Timestamps display in local timezone (stored as UTC internally)."#;
+
 const QUERIES_SCHEMA_HELP: &str = r#"DATABASE SCHEMA:
 
   Tables:

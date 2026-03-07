@@ -246,7 +246,7 @@ impl McpService {
         json_result(&results)
     }
 
-    #[tool(description = "List files touched by Claude Code across sessions, with optional session and path filters.")]
+    #[tool(description = "List files touched by Claude Code across sessions. Filters: session_id, path (substring match), project (substring match on project_path via sessions table). Use project to scope results to one project when the same filename appears in many.")]
     async fn list_files(
         &self,
         Parameters(params): Parameters<ListFilesParams>,
@@ -272,7 +272,7 @@ impl McpService {
         json_result(&results)
     }
 
-    #[tool(description = "Show chronological file operations (read, write, edit) on a specific file path.")]
+    #[tool(description = "Show chronological file operations (read, write, edit) on a file. Path is substring matched — partial paths like 'main.rs' work. Use project to scope to a specific project. Returns operations with content, timestamps, and message UUIDs.")]
     async fn file_history(
         &self,
         Parameters(params): Parameters<FileHistoryParams>,

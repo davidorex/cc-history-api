@@ -41,8 +41,8 @@ Available tools:
 - search_messages: Full-text search (FTS5) across all message content
 - list_sessions: Browse sessions filtered by project, date range
 - query_messages: Filter messages by session, type, model, tool, date
-- list_files: Files touched by Claude Code across sessions
-- file_history: Chronological operations on a specific file
+- list_files: Files touched by Claude Code across sessions (substring path and project filters)
+- file_history: Chronological operations on a file (substring path and project filters)
 - git_log: Git operations extracted from Bash tool calls
 - get_stats: Token usage, tool frequency, model breakdown
 - execute_sql: Read-only SQL passthrough (any SELECT query)
@@ -52,12 +52,29 @@ Available tools:
 - search_bookmarks: Search bookmarks by label or tag text
 - get_bookmark: Retrieve a single bookmark by ID or assistant message UUID
 
+Recommended workflows:
+
+1. Find what happened in a project:
+   list_sessions(project=\"myproject\") -> pick session_id -> query_messages(session_id=...)
+
+2. Find a file across projects:
+   list_files(path=\"main.rs\", project=\"myproject\") -> file_history(path=\"main.rs\", project=\"myproject\")
+
+3. Search conversations:
+   search_messages(query=\"error handling\")
+   FTS5 syntax: AND, OR, NOT, \"phrase match\", prefix*. Hyphenated terms need quoting.
+
+4. Custom analysis:
+   list_queries() to discover canned queries, then run_query(name=..., params={...})
+   Or execute_sql() for ad-hoc SELECT queries.
+
 For execute_sql, the database schema includes tables: sessions, messages, \
 message_content, token_usage, tool_executions, files, file_operations, \
 git_operations, projects, agents, version_history, schema_drift_log. \
 FTS tables: fts_message_content, fts_file_operations. \
 Views: v_file_token_cost, v_file_conversation_context, v_project_summary, \
-v_file_provenance, v_git_commit_context, v_tool_errors, v_session_cost.";
+v_file_provenance, v_git_commit_context, v_tool_errors, v_session_cost. \
+Path and project filters use LIKE substring matching — partial names work.";
 
 // ---------------------------------------------------------------------------
 // Transport builders
