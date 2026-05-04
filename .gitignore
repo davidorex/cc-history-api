@@ -25,3 +25,10 @@ claude-history.sock
 # Environment
 .env
 cc-history-api.md
+
+# MCPB bundle build outputs — mcpb/manifest.json is committed as the
+# source-of-truth manifest; the bundled binary and the packaged .mcpb
+# archive are reproducible from `cargo build --release` plus the bundling
+# step, and are kept out of git history to avoid bloat
+mcpb/bin/
+mcpb/*.mcpb

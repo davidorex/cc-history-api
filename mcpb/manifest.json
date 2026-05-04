@@ -1,0 +1,45 @@
+{
+  "manifest_version": "0.3",
+  "name": "claude-history",
+  "display_name": "Claude History",
+  "version": "0.1.0",
+  "description": "Queryable access to Claude Code session history — search messages, browse sessions, trace file operations, git operations, token usage, and run arbitrary SQL against the local session database.",
+  "author": {
+    "name": "David Rex",
+    "url": "https://github.com/davidorex"
+  },
+  "license": "MIT",
+  "user_config": {
+    "db_path": {
+      "type": "file",
+      "title": "Database Path",
+      "description": "Path to the claude-history SQLite database",
+      "required": false,
+      "default": "${HOME}/.claude/.claude-history.db"
+    }
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "bin/claude-history",
+    "mcp_config": {
+      "command": "${__dirname}/bin/claude-history",
+      "args": ["mcp-stdio", "--db-path", "${user_config.db_path}"]
+    }
+  },
+  "tools": [
+    { "name": "search_messages", "description": "Full-text search (FTS5) across all message content" },
+    { "name": "list_sessions", "description": "Browse sessions filtered by project, date range" },
+    { "name": "query_messages", "description": "Filter messages by session, type, model, tool, date" },
+    { "name": "list_files", "description": "Files touched by Claude Code across sessions" },
+    { "name": "file_history", "description": "Chronological operations on a specific file" },
+    { "name": "git_log", "description": "Git operations extracted from Bash tool calls" },
+    { "name": "get_stats", "description": "Token usage, tool frequency, model breakdown" },
+    { "name": "execute_sql", "description": "Read-only SQL passthrough (any SELECT query)" },
+    { "name": "run_query", "description": "Execute named canned queries with parameter binding" },
+    { "name": "list_queries", "description": "Discover available canned queries" }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin"]
+  }
+}
