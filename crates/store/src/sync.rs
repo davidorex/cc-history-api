@@ -380,6 +380,43 @@ pub async fn sync_all(
         "Sync complete"
     );
 
+    // Backfill version_history from sessions table at end of sync_all.
+    //
+    // Mirrors the watcher's startup-time backfill at crates/server/src/watcher.rs:512-526
+    // so that `claude-history sync` (CLI, no daemon) keeps version_history current
+    // even when the daemon has been down for a stretch and one or more new Claude
+    // Code versions appeared in JSONL during that window.
+    //
+    // INSERT OR IGNORE keeps the operation idempotent: versions already in
+    // version_history are left alone, and only newly-observed versions get rows.
+    // Because of OR IGNORE this also does not re-derive session_count for
+    // already-present versions — that semantics question is the subject of D3
+    // (unify session_count semantics) and is intentionally out of scope here.
+    //
+    // Failures are logged at warn level and do not propagate; sync_all has
+    // already done its primary work (sessions/messages/etc. are committed),
+    // and version_history will be re-attempted on the next sync or daemon start.
+    let backfill_result = conn.call(|c| {
+        c.execute_batch(
+            "INSERT OR IGNORE INTO version_history (version, first_seen_at, last_seen_at, session_id, session_count)
+             SELECT
+                 version,
+                 MIN(first_seen_at),
+                 MAX(COALESCE(last_seen_at, first_seen_at)),
+                 (SELECT s2.session_id FROM sessions s2 WHERE s2.version = sessions.version
+                  ORDER BY s2.first_seen_at ASC LIMIT 1),
+                 COUNT(*)
+             FROM sessions
+             WHERE version IS NOT NULL AND version != ''
+             GROUP BY version"
+        )
+    }).await;
+
+    match backfill_result {
+        Ok(()) => tracing::info!("version_history backfill (sync_all) processed"),
+        Err(e) => tracing::warn!(error = %e, "version_history backfill (sync_all) failed — will be retried on next sync or daemon start"),
+    }
+
     // Rebuild FTS5 index if any files were synced (new data ingested).
     // Skip rebuild when nothing changed to avoid unnecessary work on
     // no-op syncs. The rebuild re-indexes all message_content rows in
@@ -436,6 +473,16 @@ mod tests {
         format!(
             r#"{{"type":"user","uuid":"{}","timestamp":"2026-02-20T01:00:00Z","sessionId":"{}","version":"2.1.49","cwd":"/tmp","isSidechain":false,"userType":"external","gitBranch":"main","message":{{"role":"user","content":"hello"}}}}"#,
             uuid, session_id
+        )
+    }
+
+    /// Variant of `valid_user_line` that lets the test pin an explicit `version`
+    /// string. Used by the version_history backfill regression test to construct
+    /// sessions tagged with several distinct Claude Code versions.
+    fn valid_user_line_with_version(uuid: &str, session_id: &str, version: &str) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"{}","timestamp":"2026-02-20T01:00:00Z","sessionId":"{}","version":"{}","cwd":"/tmp","isSidechain":false,"userType":"external","gitBranch":"main","message":{{"role":"user","content":"hello"}}}}"#,
+            uuid, session_id, version
         )
     }
 
@@ -732,5 +779,111 @@ mod tests {
             .await
             .expect("should get session");
         assert_eq!(session_id, session_uuid);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test (D1): sync_all backfills version_history from the sessions table.
+    //
+    // Aim: lock in the new behavior added by D1 — `claude-history sync` (CLI,
+    // no daemon) keeps version_history current. Pre-D1 this test would fail
+    // with version_history row count = 0, because nothing in the sync_all
+    // path touched version_history.
+    //
+    // Setup: three JSONL files, each with two user records. Each file uses
+    // a distinct `version` string. Decomposing user records creates rows in
+    // the sessions table with the version from the JSONL record.
+    //
+    // Expected post-condition:
+    //   - version_history has exactly 3 rows (one per distinct version)
+    //   - per-version session_count matches COUNT(*) FROM sessions WHERE version=?
+    //
+    // Note on session_count: the backfill SQL uses INSERT OR IGNORE. On a
+    // fresh DB with no prior version_history rows, every version gets its
+    // first row written here, so session_count is the COUNT(*) result. The
+    // case where version_history already has a row for a version (and OR
+    // IGNORE skips the update) is the subject of D3 — explicitly out of
+    // scope for this test.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_sync_all_backfills_version_history() {
+        let tmp_dir = tempfile::tempdir().expect("should create temp dir");
+        let projects_dir = tmp_dir.path().join("projects");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+
+        let db_path = tmp_dir.path().join("test.db");
+        let conn = db::init_db(&db_path).await.expect("should init db");
+
+        // Three sessions, each at a distinct version, two records each.
+        let fixtures: &[(&str, &str)] = &[
+            ("sess-vh-001", "2.1.100"),
+            ("sess-vh-002", "2.1.115"),
+            ("sess-vh-003", "2.1.130"),
+        ];
+
+        for (i, (session, version)) in fixtures.iter().enumerate() {
+            let content = format!(
+                "{}\n{}\n",
+                valid_user_line_with_version(&format!("u{}-a", i), session, version),
+                valid_user_line_with_version(&format!("u{}-b", i), session, version),
+            );
+            write_jsonl_file(&projects_dir, &format!("{}.jsonl", session), &content);
+        }
+
+        let result = sync_all(&conn, &projects_dir)
+            .await
+            .expect("sync_all should succeed");
+        assert_eq!(result.files_synced, 3);
+
+        // version_history must contain one row per distinct version.
+        let vh_count: i64 = conn
+            .call(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM version_history", [], |row| row.get(0))
+            })
+            .await
+            .expect("should count version_history");
+        assert_eq!(
+            vh_count, 3,
+            "version_history must have exactly 3 rows after sync_all (one per distinct version in fixtures)"
+        );
+
+        // Per-version session_count in version_history must match the count
+        // of sessions rows at that version. With one session per version in
+        // this fixture, that count is 1 each.
+        for (_session, version) in fixtures.iter() {
+            let version_owned = (*version).to_string();
+            let v_for_vh = version_owned.clone();
+            let vh_session_count: i64 = conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT session_count FROM version_history WHERE version = ?1",
+                        [&v_for_vh],
+                        |row| row.get(0),
+                    )
+                })
+                .await
+                .expect("should read version_history.session_count");
+
+            let v_for_sess = version_owned.clone();
+            let sessions_at_version: i64 = conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sessions WHERE version = ?1",
+                        [&v_for_sess],
+                        |row| row.get(0),
+                    )
+                })
+                .await
+                .expect("should count sessions at version");
+
+            assert_eq!(
+                vh_session_count, sessions_at_version,
+                "version_history.session_count for version {} must equal COUNT(*) FROM sessions WHERE version = ?",
+                version_owned
+            );
+            assert_eq!(
+                sessions_at_version, 1,
+                "fixture invariant: exactly one session per version"
+            );
+        }
     }
 }
