@@ -16,6 +16,29 @@ The template is structured to be evaluable against the canonical Anthropic guida
 4. Set `Agent` tool parameters explicitly: `description` (3–5 word task name), `subagent_type` (matching the kind of work — see selection guide below), `isolation: "worktree"` when the subagent will write code that must not collide with the parent's working tree.
 5. Before invoking, evaluate the filled prompt against the rubric at the bottom of this template.
 
+### Pre-spawn batching analysis (mandatory before grouping subagents in parallel)
+
+Before invoking multiple `Agent` tool calls in a single message for parallel execution, enumerate the files each candidate subagent will touch and verify pairwise compile-time independence. **DAG-independence (the plan's claim that no commit must precede another) is necessary but not sufficient for safe parallel execution.**
+
+A parallel batch is safe iff, for every pair (X, Y) of subagents in the batch, X's intermediate working-tree state cannot break Y's `cargo build --release` or `cargo test` verification. Compile-time coupling that surfaces during X's mid-run state will cause Y to stop per mandate-008, losing Y's work.
+
+**Procedure**:
+
+1. For each candidate subagent, enumerate the files it will modify (read its prompt's `<task>` and `<scope>` sections; cross-reference against the plan's files-to-modify table).
+2. For each pair, check: does either subagent modify a file in `crates/core/src/` (load-bearing types) or any crate that the other subagent's verification compiles against? If yes, the pair is compile-time coupled.
+3. For any compile-time-coupled pair, **do not parallelize**. Either:
+   - **Serialize**: spawn one, wait for its commit, then spawn the next. The plan's spawn-order DAG already specifies sequencing for hard logical dependencies; this rule extends sequencing to compile-time dependencies the DAG doesn't surface.
+   - **Worktree isolation**: pass `isolation: "worktree"` to each `Agent` call so each subagent operates on its own git worktree. Intermediate states cannot collide. Cost: more disk + slower clone; appropriate for genuinely-independent-DAG-but-compile-coupled batches.
+4. If no compile-coupling for any pair, parallelization is safe. Spawn in a single message with multiple `Agent` calls.
+
+**Reference incident (2026-05-09)**: batch was {B1.1, D1, D2, D3}, all DAG-independent per the plan. B1.1 modified `JSONLRecord` enum in `crates/core/src/record.rs`, which `crates/server/src/{serve,watcher}.rs` (D2's and D3's working set) transitively compile against via the workspace dependency graph. When D2 and D3 ran their `cargo build` verification mid-batch, they observed B1.1's intermediate state where the new `Unknown` variant was added to the enum but not yet matched in `crates/store/src/drift.rs::log_record_overflow`. They stopped per mandate-008. WIP discarded; tasks reverted to pending; re-spawn required. Cost of recovery exceeded what pre-spawn analysis would have cost.
+
+**Rule of thumb for this project**:
+- B-tier and C-tier items modify load-bearing core types — never parallel with anything in server or store crates that compiles against those types.
+- Multiple D-tier items: check pairwise file-touched sets; D2 and D3 both modify `crates/server/src/watcher.rs` and cannot be batched even with each other.
+- A-tier items (A1: outside-repo files; A2: build-output and tracked manifest only) safely parallelize with each other but check before mixing with non-A-tier.
+- Tier-4 items that touch genuinely independent files (e.g., D1 modifies only `crates/store/src/sync.rs`) can parallelize with one B/C item only if that item doesn't compile-couple to D1's surface.
+
 ## Subagent type selection guide
 
 Per *Create custom subagents* §Built-in subagents (May 8, 2026):

@@ -92,7 +92,7 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` complete · `[!]` blo
 
 ### Tier 2 — Structural floor (B1.1 is start of B/C chain; must precede C tier)
 
-- [ ] **B1.1** JSONLRecord::Unknown variant + migration 007 *(no predecessors; B/C chain starts here)*
+- [x] **B1.1** JSONLRecord::Unknown variant + migration 007 *(no predecessors; B/C chain starts here)*  *— landed in 99ee138: manual Deserialize impl on JSONLRecord with two-pass dispatch; new Unknown { type_name, raw } variant; new decompose_unknown fn; new drift::log_record_type_drift fn; migration 007_record_type_drift.sql with UNIQUE(type_name, version); MIGRATIONS array registration; 5 new tests in record.rs + 5 new tests in drift.rs + 4 new tests in schema.rs; cargo test passes 44/44 core, 138/138 store. db.rs idempotency assertion bumped 6→7 (single-line coupling fix).*
   - [ ] B1.1-Audit
   - [ ] B1.1-Triage
   - [ ] B1.1-Review *(gate for B1.2)*
@@ -142,15 +142,15 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` complete · `[!]` blo
 
 ### Tier 4 — Cleanup (technical debt, non-blocking)
 
-- [ ] **D1** Move version_history backfill into sync_all *(no predecessors)*
+- [x] **D1** Move version_history backfill into sync_all *(no predecessors)*  *— landed in 6a91894: 38-line INSERT OR IGNORE block at end of sync_all (between "Sync complete" tracing and FTS rebuild); regression test test_sync_all_backfills_version_history with 3-version fixture asserting per-version session_count from sessions table. cargo test 129/129 store.*
   - [ ] D1-Audit
   - [ ] D1-Triage
   - [ ] D1-Review *(gate for D4)*
-- [ ] **D2** Sequence the daemon-startup race *(no predecessors)*
+- [ ] **D2** Sequence the daemon-startup race *(no predecessors)*  *— spawned 2026-05-09 in parallel with B1.1+D1+D3 batch; subagent stopped per mandate-008 with build failure caused by parallel-execution race against B1.1's intermediate state; WIP discarded via `git checkout` per Path III; reverted to pending*
   - [ ] D2-Audit
   - [ ] D2-Triage
   - [ ] D2-Review
-- [ ] **D3** Unify session_count semantics *(no predecessors)*
+- [ ] **D3** Unify session_count semantics *(no predecessors)*  *— spawned 2026-05-09 in parallel with B1.1+D1+D2 batch; same race-induced stop; WIP discarded; reverted to pending*
   - [ ] D3-Audit
   - [ ] D3-Triage
   - [ ] D3-Review *(gate for D4)*
