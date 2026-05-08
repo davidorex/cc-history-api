@@ -97,7 +97,7 @@ Each step is purely organizational. No step asks the subagent to evaluate, prior
 -->
 
 <constraints>
-- **Do not use severity language anywhere in your output.** Forbidden words (case-insensitive): `critical`, `severe`, `important`, `urgent`, `high`, `medium`, `low`, `minor`, `nit`, `nitpick`, `blocker`, `blocking`, `non-blocking`, `priority`, `prioritize`, `worth fixing`, `safe to ignore`, `should fix`, `should address`, `consider fixing`, `easy fix`, `hard fix`, `quick win`, `low-hanging fruit`, `red flag`, `concerning`, `troubling`, `worrying`. If you find yourself reaching for any of these, STOP and rephrase as a structural fact (category, surface, impact class).
+- **Do not use severity language anywhere in your output.** Forbidden words (case-insensitive): `critical`, `severe`, `important`, `urgent`, `high`, `medium`, `low`, `minor`, `nit`, `nitpick`, `blocker`, `priority`, `prioritize`, `worth fixing`, `safe to ignore`, `should fix`, `should address`, `consider fixing`, `easy fix`, `hard fix`, `quick win`, `low-hanging fruit`, `red flag`, `concerning`, `troubling`, `worrying`. If you find yourself reaching for any of these, STOP and rephrase as a structural fact (category, surface, impact class). Note: `blocking` and `non-blocking` are intentionally NOT in this list because the template prescribes `build-blocking` and `test-blocking` as required categorical axis labels (see `<task>` step 5); a grep for "blocking" would false-positive on those structural labels. Severity-coded uses of "blocking" (e.g., "this is blocking", "blocker bug") are still constrained by the entries above (`blocker`) and by the no-recommendation constraint below.
 - **Do not recommend action.** No phrases like "the user should", "would benefit from", "could be addressed by", "remediation: ...". State the deviation's structural properties; stop there.
 - **Do not interpret summary statistics.** A higher count in one category vs. another is a fact, not a finding. Reporting "5 omissions and 1 addition" is allowed; saying "more omissions than additions, suggesting incomplete implementation" is not allowed.
 - **Do not skip rows.** Every deviation in the input catalog appears in at least one grouping in the output. Use deviation # for traceability.
@@ -147,8 +147,12 @@ The output is purely tabular; tables resist editorial smuggling more than prose.
 Before declaring completion, run a self-check against the forbidden-word list:
 
 ```bash
-# Save your draft output to /tmp/triage-output.md before this check
-grep -iE 'critical|severe|important|urgent|\bhigh\b|\bmedium\b|\blow\b|minor|\bnit\b|nitpick|blocker|blocking|non-blocking|priority|prioritize|worth fixing|safe to ignore|should fix|should address|consider fixing|easy fix|hard fix|quick win|low-hanging fruit|red flag|concerning|troubling|worrying' /tmp/triage-output.md
+# Save your draft output to /tmp/triage-output.md before this check.
+# Note: the regex deliberately excludes the bare "blocking" and "non-blocking"
+# tokens because the template prescribes "build-blocking" and "test-blocking"
+# as required categorical axis labels. The "blocker" entry below still catches
+# severity-coded uses ("blocker bug", "this is a blocker").
+grep -iE 'critical|severe|important|urgent|\bhigh\b|\bmedium\b|\blow\b|minor|\bnit\b|nitpick|\bblocker\b|priority|prioritize|worth fixing|safe to ignore|should fix|should address|consider fixing|easy fix|hard fix|quick win|low-hanging fruit|red flag|concerning|troubling|worrying' /tmp/triage-output.md
 ```
 
 Expected result: zero output. Any matches indicate severity language slipped in. Revise the matched lines to factual structural statements before returning. Re-run grep after revision; only return the output when grep is empty.

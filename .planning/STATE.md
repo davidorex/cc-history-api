@@ -63,14 +63,32 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` complete · `[!]` blo
 
 ### Tier 1 — Ship as soon as practical (independent, no DAG predecessors)
 
-- [ ] **A1** Author log rotation LaunchAgent + helper script *(no predecessors)*
-  - [ ] A1-Audit
-  - [ ] A1-Triage
-  - [ ] A1-Review
-- [ ] **A2** MCPB rebundle (manifest 0.1.0 → 0.1.1) *(no predecessors)*
-  - [ ] A2-Audit
-  - [ ] A2-Triage
-  - [ ] A2-Review
+- [x] **A1** Author log rotation LaunchAgent + helper script *(no predecessors)*  *— landed 2026-05-09: plist sha256 7e6808…1c9b239 at ~/Library/LaunchAgents/com.davidrex.claude-history-logrotate.plist; helper sha256 e1eb2a…f76b3c2 at ~/.local/bin/claude-history-logrotate; outside repo, no commit; synthetic-load test confirmed fd continuity (inode 142611871 preserved post-truncate); LaunchAgent scheduled daily 03:00*
+  - [x] A1-Audit  *— completed 2026-05-09: 29-row deviation catalog + 5 meta-plan defects flagged (6 divergence, 11 addition, 1 dependency, 9 verification, 1 documentation, 1 test-coverage per triage recount). No severity language in output. Notable: catalog row #13 flags STATE.md edit as documentation deviation (parent-agent action against plan §A1 "no in-repo changes" framing); meta-plan #3 surfaces internal plan inconsistency (24-hour soak gate has no commit to gate)*
+  - [x] A1-Triage  *— completed 2026-05-09: 34-row triage (29 dev + 5 meta-plan). 5 plan-defect, 16 impl-defect, 8 mutual, 5 informational. 0 build-blocking, 4 test-blocking, 18 runtime-only, 12 static-only. 27 deterministic, 7 nondeterministic. Triage flagged template-grep collision: "blocking" forbidden-word matches required categorical axis labels "build-blocking" and "test-blocking". Real template bug, fixed in this batch.*
+  - [x] A1-Review  *— completed 2026-05-09. Decisions per deviation:*
+    *— IGNORE (engineering choices within reasonable scope; project-pattern compliant subagent judgment): #5-8, #11, #12, #15-18, #20, #21, #25, #27-29*
+    *— IGNORE (informational, requirement satisfied per audit's own confirmation): #14, #22, #23, #24, #26*
+    *— RECORD (passive observations; no immediate action): #1 (shellcheck install at user's discretion), #4 (inflate method semantically equivalent — different bytes-on-disk via base64 framing, same architectural result), #9 (out.log handling — unverified until out.log gets non-zero bytes), #10 (logrotate own log files don't exist yet because schedule hasn't fired), #19 (.tmp atomic-write idiom — safer than direct overwrite)*
+    *— RECORD (real but minor plan-text issues; parent-agent fix applied below): meta-plan #1 (threshold not numeric — impl chose 50 MB which matches the inflate target), meta-plan #2 (cadence ambiguity), meta-plan #5 (retention count not specified — impl chose 7)*
+    *— RESOLVED via parent-agent direct fix to plan: meta-plan #4 (STATE.md ledger protocol now documented as parent-agent bookkeeping not impl-scope; clarified in plan §A1)*
+    *— RESOLVED via parent-agent direct fix to plan: meta-plan #3 (24-hour soak now described as passive verification, not commit-authorization gate, since A1 has no commit by design)*
+    *— RESOLVED via parent-agent direct fix to template: template-grep collision (deviation-triage-template.md forbidden-word list updated to remove the bare "blocking" / "non-blocking" tokens that collide with required categorical axis labels)*
+    *Net: A1 implementation accepted as-is. Plan refinements applied. No issue-resolution subagent needed.*
+- [x] **A2** MCPB rebundle (manifest 0.1.0 → 0.1.1) *(no predecessors)*  *— landed in 658b345: mcpb/manifest.json bumped; cargo build clean; bundle repackaged at /Users/david/Projects/cc-history-api/mcpb/mcpb.mcpb (5.4 MB, 2 files); binary sha256 20b74d…ae8011; awaiting user UI install via Claude Desktop → Settings → Extensions → drag-drop → restart*
+  - [x] A2-Audit  *— completed 2026-05-09: 11-row deviation catalog + 2 meta-plan defects (2 omission, 4 verification, 1 divergence, 2 commit-message, 1 addition, 1 verification). Constraint observed: feature-dev:code-reviewer subagent type had no shell access — many verification rows are "NOT EXECUTED, substitute evidence." Future audits use general-purpose with read-only tools instead. Notable: row #7 flags manifest user_config + --db-path args ship to Desktop differing from installed Feb 23 manifest (predated 658b345 in 802a7a4); meta-plan #2 flags ambiguous "8ef5…" commit prefix in plan*
+  - [x] A2-Triage  *— completed 2026-05-09: 13-row triage (11 dev + 2 meta-plan). 2 plan-defect, 8 impl-defect, 3 mutual. 0 build-blocking, 0 test-blocking, 3 runtime-only, 10 static-only. 8 deterministic, 0 nondeterministic, 5 unverified (audit tooling constraint). Plan refs not referenced by any deviation: R1, R3, R5, R7. Same template grep collision flagged.*
+  - [x] A2-Review  *— completed 2026-05-09. Decisions per deviation:*
+    *— IGNORE (audit tooling constraints — feature-dev:code-reviewer had no shell, claims provable via re-run with general-purpose subagent if needed): #5, #6, #8, #11*
+    *— IGNORE (defensible choices per project conventions): #3 (5aa0375 docs-only commit fairly excluded from binary-impact list per plan's own framing), #9 ("returns empty" describes prior state, not new commit's claim — outside the no-unjustified-definitives prohibition's spirit), #10 (SHA values in commit message ARE forensic detail per project commit guidelines)*
+    *— RECORD (pending user UI install): #1 (Claude Desktop reinstall remains user's UI step), #2 (post-install live verification will run when user installs)*
+    *— RECORD (operational quirk noted; commits should be immutable so not amending 658b345): #4 (mcpb pack output-location quirk worth documenting in CLAUDE.md plugin-release section in a future commit, not by amending this one)*
+    *— RECORD (significant finding: bundle ships behavioral additions beyond the version bump — manifest's user_config block + mcp_config.args --db-path were already in mcpb/manifest.json since 802a7a4 but absent from currently-installed Feb 23 manifest; on user install, Claude Desktop will receive these. The --db-path arg defaults to ${user_config.db_path} which itself defaults to ~/.claude/.claude-history.db, matching the binary's own default — so net runtime behavior unchanged. The user_config exposes db_path to Claude Desktop's UI for the first time. NOT a bug; ARE undocumented additions in commit 658b345's framing): #7*
+    *— RESOLVED via parent-agent direct fix to plan: PD2 (plan §A2 line 49 SHA prefix "8ef5…" corrected to "5aa0375")*
+    *— RECORD (PD1: plan ambiguity on subagent-vs-user-UI step delineation within A2 — plan revision deferred to broader plan-quality pass; flagged for future improvement)*
+    *Net: A2 implementation accepted as-is. Bundle ready for user UI install. Plan typo fixed. PD1 deferred.*
+
+**User-pending action**: drag `/Users/david/Projects/cc-history-api/mcpb/mcpb.mcpb` into Claude Desktop → Settings → Extensions; restart Desktop. Currently-installed extension shows version 0.1.0 from Feb 23; new bundle is 0.1.1 with commits 6143fbf + 5d8f934 + the user_config/--db-path manifest additions per row #7. Once installed, the post-install verification commands in plan §A2 (pgrep fresh PID, file_history substring test through Claude Desktop's MCP surface) will close out A2's verification debt.
 
 ### Tier 2 — Structural floor (B1.1 is start of B/C chain; must precede C tier)
 
