@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "claude-history",
   "display_name": "Claude History",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Queryable access to Claude Code session history — search messages, browse sessions, trace file operations, git operations, token usage, and run arbitrary SQL against the local session database.",
   "author": {
     "name": "David Rex",
