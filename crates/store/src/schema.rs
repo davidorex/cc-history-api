@@ -15,6 +15,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("004", include_str!("../migrations/004_modeling.sql")),
     ("005", include_str!("../migrations/005_drop_noise.sql")),
     ("006", include_str!("../migrations/006_version_monitoring.sql")),
+    ("007", include_str!("../migrations/007_record_type_drift.sql")),
 ];
 
 /// Errors that can occur during migration application.
@@ -267,10 +268,88 @@ mod tests {
             .unwrap();
         // version_history is empty on a fresh in-memory DB (no sessions to backfill from)
         assert_eq!(vh_count, 0, "version_history should be empty on fresh DB");
-        // schema_versions should have 6 entries (one per migration)
+        // schema_versions should have 7 entries (one per migration)
         assert_eq!(
-            sv_count, 6,
-            "schema_versions should track all 6 applied migrations"
+            sv_count, 7,
+            "schema_versions should track all 7 applied migrations"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration 007: record_type_drift_log table for variant-level drift
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_007_creates_record_type_drift_log_table() {
+        let conn = migrated_conn();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'record_type_drift_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            exists,
+            "record_type_drift_log table should exist after migration 007"
+        );
+    }
+
+    #[test]
+    fn migration_007_columns_queryable() {
+        let conn = migrated_conn();
+        conn.execute_batch(
+            "SELECT id, type_name, version, sample_value, first_seen_at,
+                    last_seen_at, occurrence_count
+             FROM record_type_drift_log LIMIT 0",
+        )
+        .expect(
+            "record_type_drift_log should have all expected columns after migration 007",
+        );
+    }
+
+    #[test]
+    fn migration_007_unique_constraint_on_type_name_version() {
+        let conn = migrated_conn();
+        // Two distinct (type_name, version) pairs should both insert.
+        conn.execute(
+            "INSERT INTO record_type_drift_log (type_name, version, sample_value)
+             VALUES ('attachment', '2.1.126', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO record_type_drift_log (type_name, version, sample_value)
+             VALUES ('attachment', '2.1.91', '{}')",
+            [],
+        )
+        .unwrap();
+        // Re-inserting the same (type_name, version) should fail without
+        // ON CONFLICT — proving the UNIQUE constraint is in place.
+        let dup_result = conn.execute(
+            "INSERT INTO record_type_drift_log (type_name, version, sample_value)
+             VALUES ('attachment', '2.1.126', '{}')",
+            [],
+        );
+        assert!(
+            dup_result.is_err(),
+            "duplicate (type_name, version) should be rejected by UNIQUE constraint"
+        );
+    }
+
+    #[test]
+    fn migration_007_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = '007'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "migration 007 should be recorded exactly once");
     }
 }

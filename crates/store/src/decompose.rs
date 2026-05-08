@@ -66,6 +66,7 @@ pub fn decompose_record(
         JSONLRecord::FileHistorySnapshot(r) => {
             decompose_file_history_snapshot(r, session_id_from_file, tx)?
         }
+        JSONLRecord::Unknown { type_name, raw } => decompose_unknown(type_name, raw, tx)?,
     };
 
     // Upsert the project row for full-base record types that carry a cwd.
@@ -719,6 +720,83 @@ fn decompose_file_history_snapshot(
         &r.overflow,
         tx,
     )?;
+
+    Ok(result)
+}
+
+/// Maximum sample-value length stored in `record_type_drift_log.sample_value`.
+/// Mirrors `MAX_SAMPLE_VALUE_LEN` in `crates/store/src/drift.rs` so the two
+/// drift tables share a consistent truncation policy.
+const RECORD_TYPE_SAMPLE_MAX_LEN: usize = 500;
+
+/// Decompose a `JSONLRecord::Unknown` variant.
+///
+/// Records whose top-level `type` discriminator is not one of the seven known
+/// values land here. We do not write to any structural data table — the record
+/// shape is, by definition, not yet modeled. Instead we record the
+/// (type_name, version) pair plus a truncated sample of the raw JSON to
+/// `record_type_drift_log` via `drift::log_record_type_drift`.
+///
+/// `version` is extracted from `raw.version` if present and a string. Some
+/// observed unknown discriminators (e.g. `last-prompt`, `custom-title`) carry
+/// no `version` field at all; in that case `None` is recorded and participates
+/// in the table's UNIQUE(type_name, version) constraint as SQL NULL.
+///
+/// `sample_value` is the raw record's JSON serialization truncated to
+/// [`RECORD_TYPE_SAMPLE_MAX_LEN`] characters. The truncation is performed on
+/// a UTF-8 char boundary to avoid panicking on multi-byte content. The
+/// truncation policy mirrors the per-field drift logger (`drift::log_overflow`)
+/// so the two drift tables produce comparable forensic samples.
+///
+/// Note that B1.1 deliberately does NOT write to a backfill / archival table
+/// (`dropped_records` per the audit's optional shape) — that is split into
+/// B1.2's bytewise re-ingestion responsibility. This commit only closes the
+/// silent-drop blind spot prospectively for newly-emitted records and writes
+/// no message/system/etc. row for unknown variants.
+///
+/// Returns `DecomposeResult { rows_inserted: 0, overflow_fields: <changed> }`
+/// where `changed` is 1 for both new inserts and conflicting updates (matching
+/// `drift::log_overflow` semantics so callers can sum the two counts).
+fn decompose_unknown(
+    type_name: &str,
+    raw: &serde_json::Value,
+    tx: &Transaction,
+) -> Result<DecomposeResult, DecomposeError> {
+    let mut result = DecomposeResult::default();
+
+    // Extract optional version string from the raw record envelope.
+    // Records without a version field (e.g. `last-prompt`) record None,
+    // which is preserved by record_type_drift_log's nullable version column.
+    let version = raw
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Build the sample value: the entire raw JSON record, truncated.
+    // A full record may be hundreds of KB (especially for attachment payloads
+    // carrying skill listings or MCP instruction blocks); 500 chars is enough
+    // for forensic identification without bloating the drift log.
+    let raw_json = serde_json::to_string(raw)?;
+    let sample_value = if raw_json.len() > RECORD_TYPE_SAMPLE_MAX_LEN {
+        let mut cut = RECORD_TYPE_SAMPLE_MAX_LEN;
+        while !raw_json.is_char_boundary(cut) && cut > 0 {
+            cut -= 1;
+        }
+        format!("{}...", &raw_json[..cut])
+    } else {
+        raw_json
+    };
+
+    // Delegate the actual INSERT to drift::log_record_type_drift. The drift
+    // module owns the SQL shape; decompose_unknown only assembles inputs.
+    let changed =
+        drift::log_record_type_drift(type_name, version.as_deref(), &sample_value, tx)?;
+
+    // The variant did not produce any structural-table rows — it produced one
+    // drift-log row (or updated an existing one). Surface that via the
+    // overflow_fields counter so downstream telemetry treats it consistently
+    // with field-level drift observations.
+    result.overflow_fields = changed;
 
     Ok(result)
 }

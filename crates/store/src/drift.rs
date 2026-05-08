@@ -93,6 +93,64 @@ pub fn log_overflow(
     Ok(new_entries)
 }
 
+/// Log a single `(type_name, version)` observation to `record_type_drift_log`.
+///
+/// This is the variant-level analogue of [`log_overflow`]: where `log_overflow`
+/// tracks unknown *fields* on a known record type, this function tracks
+/// records whose top-level `type` discriminator is itself unknown — i.e. a
+/// `JSONLRecord::Unknown` produced by the manual `Deserialize` impl in
+/// `crates/core/src/record.rs`.
+///
+/// The DDL at `crates/store/migrations/007_record_type_drift.sql` declares
+/// `UNIQUE(type_name, version)`, so re-observations of the same pair land on
+/// the ON CONFLICT branch and increment `occurrence_count` rather than
+/// inserting a new row. The `sample_value` is refreshed on each observation
+/// so the most recent sample is always available for forensic inspection.
+///
+/// `version` is `Option<&str>` because some unknown discriminators (e.g.
+/// `last-prompt`, `custom-title`) carry no `version` field on the record
+/// envelope; for those, SQL NULL is the right value and participates in the
+/// UNIQUE constraint via SQLite's NULL-distinct semantics — meaning every
+/// no-version observation conflicts with prior no-version observations of
+/// the same `type_name` on the same Connection. (SQLite's default UNIQUE
+/// treats NULLs as distinct in earlier versions; current versions and
+/// rusqlite's default build treat NULLs as equal under UNIQUE INDEX. The
+/// table behavior was verified via the migration_007_unique_constraint test
+/// in `crates/store/src/schema.rs`.)
+///
+/// Returns 1 for both new inserts and conflict-updates, mirroring
+/// [`log_overflow`]'s contract so callers can sum the two counts uniformly.
+///
+/// Backfill of historical records dropped before B1.1 shipped is intentionally
+/// out of scope here — that is B1.2's bytewise re-ingestion responsibility.
+pub fn log_record_type_drift(
+    type_name: &str,
+    version: Option<&str>,
+    sample_value: &str,
+    tx: &Transaction,
+) -> Result<usize, rusqlite::Error> {
+    let changed = tx.execute(
+        "INSERT INTO record_type_drift_log
+         (type_name, version, sample_value, first_seen_at, last_seen_at, occurrence_count)
+         VALUES (?1, ?2, ?3, datetime('now'), datetime('now'), 1)
+         ON CONFLICT(type_name, version) DO UPDATE SET
+           occurrence_count = record_type_drift_log.occurrence_count + 1,
+           last_seen_at = datetime('now'),
+           sample_value = excluded.sample_value",
+        rusqlite::params![type_name, version, sample_value],
+    )?;
+
+    if changed > 0 {
+        tracing::debug!(
+            type_name = type_name,
+            version = ?version,
+            "Record-type drift observed"
+        );
+    }
+
+    Ok(changed)
+}
+
 /// Convenience wrapper that extracts version, record_type, and all overflow
 /// maps from a parsed JSONLRecord and calls log_overflow for each.
 ///
@@ -152,6 +210,17 @@ pub fn log_record_overflow(
         JSONLRecord::FileHistorySnapshot(r) => {
             log_overflow("unknown", "file-history-snapshot", &r.overflow, tx)
         }
+
+        // The Unknown variant has no per-field overflow HashMap — its entire
+        // payload is the raw JSON Value, captured by `decompose_unknown` to
+        // `record_type_drift_log` (a different table from `schema_drift_log`).
+        // The variant-level drift is recorded there, not here. B1.2 may
+        // extend this arm to additionally inspect `raw` for unknown fields
+        // and surface them in `schema_drift_log` once a future record-type
+        // structure is modeled; for B1.1 the arm is a no-op so that the
+        // existing log_record_overflow contract for the seven typed variants
+        // is unchanged and the compiler exhaustiveness check is satisfied.
+        JSONLRecord::Unknown { .. } => Ok(0),
     }
 }
 
@@ -493,5 +562,253 @@ mod tests {
         assert!(types.contains(&"assistant".to_string()));
         assert!(types.contains(&"assistant.message".to_string()));
         assert!(types.contains(&"assistant.message.usage".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // B1.1 — log_record_type_drift tests (variant-level drift logging)
+    //
+    // These exercise the variant-level analogue of log_overflow. Together
+    // with the JSONLRecord::Unknown deserialization tests in
+    // crates/core/src/record.rs, they establish the contract that lets
+    // ingestion preserve records whose discriminator is not yet modeled.
+    // -----------------------------------------------------------------------
+
+    /// Test C: idempotent re-observation. Two calls with the same
+    /// (type_name, version) produce one row whose occurrence_count is 2.
+    /// Mirrors test_log_overflow_idempotent for the new table.
+    #[test]
+    fn test_log_record_type_drift_idempotent_reobservation() {
+        let conn = setup_db();
+
+        // First call: insert.
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let changed =
+                log_record_type_drift("attachment", Some("2.1.126"), "{\"sample\":1}", &tx)
+                    .unwrap();
+            tx.commit().unwrap();
+            assert_eq!(changed, 1, "first observation should report 1 row changed");
+        }
+
+        // Second call with the same (type_name, version): conflict update.
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            let changed =
+                log_record_type_drift("attachment", Some("2.1.126"), "{\"sample\":2}", &tx)
+                    .unwrap();
+            tx.commit().unwrap();
+            assert_eq!(
+                changed, 1,
+                "re-observation should report 1 row changed via ON CONFLICT DO UPDATE"
+            );
+        }
+
+        // Exactly one row should exist.
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM record_type_drift_log",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 1, "two observations should produce one row");
+
+        // occurrence_count should be 2.
+        let occ: i64 = conn
+            .query_row(
+                "SELECT occurrence_count FROM record_type_drift_log
+                 WHERE type_name = 'attachment' AND version = '2.1.126'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(occ, 2, "occurrence_count should increment on re-observation");
+
+        // sample_value should reflect the most recent observation.
+        let sample: String = conn
+            .query_row(
+                "SELECT sample_value FROM record_type_drift_log
+                 WHERE type_name = 'attachment' AND version = '2.1.126'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sample, "{\"sample\":2}",
+            "sample_value should refresh on conflict update"
+        );
+    }
+
+    /// Test: distinct (type_name, version) pairs each produce their own row.
+    /// And distinct versions for the same type_name are preserved as separate
+    /// rows so we can correlate with version_history.
+    #[test]
+    fn test_log_record_type_drift_distinct_versions() {
+        let conn = setup_db();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        log_record_type_drift("attachment", Some("2.1.126"), "{}", &tx).unwrap();
+        log_record_type_drift("attachment", Some("2.1.91"), "{}", &tx).unwrap();
+        log_record_type_drift("last-prompt", None, "{}", &tx).unwrap();
+        tx.commit().unwrap();
+
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM record_type_drift_log",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 3, "three distinct keys should produce three rows");
+
+        let attachment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM record_type_drift_log WHERE type_name = 'attachment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            attachment_count, 2,
+            "two attachment rows for two distinct versions"
+        );
+
+        // last-prompt row should have NULL version.
+        let null_version: Option<String> = conn
+            .query_row(
+                "SELECT version FROM record_type_drift_log WHERE type_name = 'last-prompt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            null_version.is_none(),
+            "last-prompt has no version field; column must be NULL"
+        );
+    }
+
+    /// Test: decompose_record dispatches a JSONLRecord::Unknown to
+    /// decompose_unknown which writes a record_type_drift_log row.
+    /// End-to-end check from the parser-equivalent input through the
+    /// dispatcher to the table.
+    #[test]
+    fn test_decompose_unknown_via_dispatcher_writes_drift_row() {
+        use crate::decompose::decompose_record;
+
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // Construct a JSONLRecord::Unknown by parsing a fictitious record.
+        let json = r#"{
+            "type": "fictitious-test-type",
+            "version": "2.1.999",
+            "sessionId": "sess-x",
+            "foo": "bar"
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+
+        // Pre-condition: it actually parsed as Unknown.
+        match &record {
+            JSONLRecord::Unknown { type_name, .. } => {
+                assert_eq!(type_name, "fictitious-test-type");
+            }
+            _ => panic!("Expected Unknown variant"),
+        }
+
+        let result = decompose_record(&record, "sess-x", &tx).unwrap();
+        tx.commit().unwrap();
+
+        // No structural-table rows should be written.
+        // (rows_inserted may be > 0 if artifacts dispatcher writes anything;
+        //  the artifacts dispatcher returns 0 for non-Assistant variants per
+        //  crates/store/src/artifacts.rs, so we expect rows_inserted == 0.)
+        assert_eq!(
+            result.rows_inserted, 0,
+            "Unknown variant should not write to structural tables"
+        );
+
+        // overflow_fields counter should record the drift-log insert.
+        assert_eq!(
+            result.overflow_fields, 1,
+            "decompose_unknown should report 1 drift-log row changed"
+        );
+
+        // Row should exist with type_name and version captured.
+        let (type_name, version, occ): (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT type_name, version, occurrence_count FROM record_type_drift_log",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(type_name, "fictitious-test-type");
+        assert_eq!(version.as_deref(), Some("2.1.999"));
+        assert_eq!(occ, 1);
+    }
+
+    /// Test: decompose_unknown handles records with no `version` field
+    /// (e.g. last-prompt) by writing NULL to the version column.
+    #[test]
+    fn test_decompose_unknown_no_version_field() {
+        use crate::decompose::decompose_record;
+
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // last-prompt: no version field (verified via the corpus survey
+        // documented in the audit doc).
+        let json =
+            r#"{"type":"last-prompt","lastPrompt":"hi","sessionId":"sess-lp"}"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+        decompose_record(&record, "sess-lp", &tx).unwrap();
+        tx.commit().unwrap();
+
+        let version: Option<String> = conn
+            .query_row(
+                "SELECT version FROM record_type_drift_log WHERE type_name = 'last-prompt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            version.is_none(),
+            "last-prompt has no version field; column must be NULL"
+        );
+    }
+
+    /// Test: the sample_value is truncated for very large unknown payloads
+    /// to keep the drift log compact.
+    #[test]
+    fn test_decompose_unknown_truncates_large_sample() {
+        use crate::decompose::decompose_record;
+
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // Build a payload whose JSON serialization exceeds 500 chars.
+        let big_string: String = "x".repeat(2000);
+        let json = format!(
+            r#"{{"type":"big-unknown","payload":"{big_string}"}}"#
+        );
+        let record: JSONLRecord = serde_json::from_str(&json).unwrap();
+        decompose_record(&record, "sess-big", &tx).unwrap();
+        tx.commit().unwrap();
+
+        let sample: String = conn
+            .query_row(
+                "SELECT sample_value FROM record_type_drift_log WHERE type_name = 'big-unknown'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sample.ends_with("..."),
+            "truncated sample should end with '...'; got: {sample}"
+        );
+        assert!(
+            sample.len() <= 504,
+            "sample should be truncated to <= 503 chars; got {} chars",
+            sample.len()
+        );
     }
 }

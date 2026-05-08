@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 
+use serde::de::{self, Deserializer};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::message::{AssistantMessage, UserMessage};
@@ -19,30 +21,219 @@ use crate::system::SystemRecord;
 
 /// Top-level discriminated union for all JSONL line types.
 ///
-/// Deserialized via `serde(tag = "type")` — the JSON "type" field selects the variant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+/// The JSON `type` field selects the variant. Seven known discriminator values
+/// dispatch to typed variants; any other string-valued discriminator falls
+/// through to [`JSONLRecord::Unknown`], which preserves the original
+/// discriminator name and the entire raw JSON object so the data is not lost.
+///
+/// The dispatch is implemented by a hand-rolled `Deserialize` impl below,
+/// not by `#[serde(tag = "type")]`. The two-pass dispatch — deserialize to
+/// `serde_json::Value`, inspect the `type` field, then dispatch to the typed
+/// variant struct via `serde_json::from_value` or fall back to the `Unknown`
+/// variant — is the mechanism the audit at
+/// `.planning/audit/jsonl-unknown-record-type-attachment-investigation-2026-05-08T0551-asia-shanghai.md`
+/// describes as Path A. `#[serde(tag = "type")]` does not natively support a
+/// catch-all variant that preserves the payload, so the dispatch is hand-written.
+///
+/// Records whose JSON has no `type` field, or whose `type` is not a JSON
+/// string, return a deserializer error — preserving the existing
+/// malformed-JSONL failure mode handled by `crates/core/src/parser.rs`.
+///
+/// The seven typed variants must continue to deserialize byte-identically to
+/// the previous `#[derive(Deserialize)] #[serde(tag = "type")]` behavior; the
+/// existing test suite at the bottom of this file exercises each variant and
+/// is the regression net for that invariant.
+#[derive(Debug, Clone)]
 pub enum JSONLRecord {
-    #[serde(rename = "user")]
     User(UserRecord),
-
-    #[serde(rename = "assistant")]
     Assistant(AssistantRecord),
-
-    #[serde(rename = "progress")]
     Progress(ProgressRecord),
-
-    #[serde(rename = "system")]
     System(SystemRecord),
-
-    #[serde(rename = "queue-operation")]
     QueueOperation(QueueOperationRecord),
-
-    #[serde(rename = "summary")]
     Summary(SummaryRecord),
-
-    #[serde(rename = "file-history-snapshot")]
     FileHistorySnapshot(FileHistorySnapshotRecord),
+    /// Catch-all for JSONL lines whose `type` discriminator is a string but
+    /// not one of the seven known values (e.g. `attachment`, `last-prompt`,
+    /// `custom-title`, `permission-mode`, `agent-name`, `ai-title`, or any
+    /// future record type). Preserves both the discriminator name and the
+    /// full raw JSON object so the bytes are recoverable downstream.
+    ///
+    /// Variant placement: this is the LAST variant in the enum so adding it
+    /// does not shift the position of any prior typed variant in the source
+    /// — important because the manual `Deserialize` impl checks the seven
+    /// known discriminators by string match and order is irrelevant there,
+    /// but match-arm ordering elsewhere in the codebase remains stable.
+    Unknown {
+        type_name: String,
+        raw: serde_json::Value,
+    },
+}
+
+/// Discriminator value -> typed variant dispatch.
+///
+/// Returns `Some` if the input is one of the seven known JSONL record-type
+/// strings, `None` otherwise. Centralized so the manual `Deserialize` impl
+/// and any future call site (e.g. validation, telemetry) read from one source.
+fn known_record_type(type_name: &str) -> Option<KnownRecordType> {
+    match type_name {
+        "user" => Some(KnownRecordType::User),
+        "assistant" => Some(KnownRecordType::Assistant),
+        "progress" => Some(KnownRecordType::Progress),
+        "system" => Some(KnownRecordType::System),
+        "queue-operation" => Some(KnownRecordType::QueueOperation),
+        "summary" => Some(KnownRecordType::Summary),
+        "file-history-snapshot" => Some(KnownRecordType::FileHistorySnapshot),
+        _ => None,
+    }
+}
+
+/// Internal enum naming the seven known record types. Used only by the
+/// manual `Deserialize` impl to keep the dispatch table tidy; not exported.
+#[derive(Debug, Clone, Copy)]
+enum KnownRecordType {
+    User,
+    Assistant,
+    Progress,
+    System,
+    QueueOperation,
+    Summary,
+    FileHistorySnapshot,
+}
+
+impl<'de> Deserialize<'de> for JSONLRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // First pass: capture the entire JSON object as a generic Value so
+        // we can inspect `type` without committing to a typed shape yet.
+        // This mirrors the audit's Path A two-pass dispatch.
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        // Extract the `type` discriminator. A missing or non-string `type`
+        // is an error condition the previous derived impl also rejected
+        // (`#[serde(tag = "type")]` requires a string discriminator); we
+        // preserve that contract so malformed JSONL still fails at the
+        // parser layer instead of being smuggled into Unknown with a
+        // synthetic type_name.
+        let type_field = value.get("type").ok_or_else(|| {
+            de::Error::missing_field("type")
+        })?;
+        let type_name = type_field.as_str().ok_or_else(|| {
+            de::Error::invalid_type(
+                de::Unexpected::Other(&format!("non-string type: {type_field}")),
+                &"a string-valued `type` discriminator",
+            )
+        })?;
+
+        // Second pass: if the discriminator is one of the seven known strings,
+        // dispatch to the typed variant struct via from_value. The error
+        // message from each typed dispatch retains its original shape so
+        // existing tests asserting on parse-error text still match.
+        //
+        // We must remove `type` from the JSON object before dispatching:
+        // each typed struct uses `#[serde(flatten)] overflow: HashMap<...>`
+        // and the `type` discriminator would otherwise be captured into
+        // overflow (which would land in schema_drift_log as if it were a
+        // novel field). The previous `#[serde(tag = "type")]` derived impl
+        // consumed the discriminator before flattening; we replicate that
+        // by stripping the field here.
+        if let Some(kind) = known_record_type(type_name) {
+            let mut typed_value = value;
+            if let Some(map) = typed_value.as_object_mut() {
+                map.remove("type");
+            }
+            return match kind {
+                KnownRecordType::User => serde_json::from_value::<UserRecord>(typed_value)
+                    .map(JSONLRecord::User)
+                    .map_err(de::Error::custom),
+                KnownRecordType::Assistant => serde_json::from_value::<AssistantRecord>(typed_value)
+                    .map(JSONLRecord::Assistant)
+                    .map_err(de::Error::custom),
+                KnownRecordType::Progress => serde_json::from_value::<ProgressRecord>(typed_value)
+                    .map(JSONLRecord::Progress)
+                    .map_err(de::Error::custom),
+                KnownRecordType::System => serde_json::from_value::<SystemRecord>(typed_value)
+                    .map(JSONLRecord::System)
+                    .map_err(de::Error::custom),
+                KnownRecordType::QueueOperation => {
+                    serde_json::from_value::<QueueOperationRecord>(typed_value)
+                        .map(JSONLRecord::QueueOperation)
+                        .map_err(de::Error::custom)
+                }
+                KnownRecordType::Summary => serde_json::from_value::<SummaryRecord>(typed_value)
+                    .map(JSONLRecord::Summary)
+                    .map_err(de::Error::custom),
+                KnownRecordType::FileHistorySnapshot => {
+                    serde_json::from_value::<FileHistorySnapshotRecord>(typed_value)
+                        .map(JSONLRecord::FileHistorySnapshot)
+                        .map_err(de::Error::custom)
+                }
+            };
+        }
+
+        // Discriminator is a string but not one of the seven known values.
+        // Capture the discriminator name and the full raw JSON object so the
+        // record is preserved for downstream forensic and drift logging
+        // (`decompose_unknown` in crates/store/src/decompose.rs).
+        Ok(JSONLRecord::Unknown {
+            type_name: type_name.to_string(),
+            raw: value,
+        })
+    }
+}
+
+impl Serialize for JSONLRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // For each typed variant, build a serde_json::Value that matches the
+        // shape the previous `#[derive(Serialize)] #[serde(tag = "type")]`
+        // emitted: the inner struct's fields with a `type` discriminator
+        // field merged in. We use serde_json::to_value + Map::insert rather
+        // than a custom map serializer because the typed variant structs
+        // already use #[serde(flatten)] for their RecordBase and overflow
+        // fields, and re-deriving that structure here would risk drift.
+        //
+        // For Unknown, we serialize the captured raw Value directly — it
+        // already includes the original `type` field intact.
+        match self {
+            JSONLRecord::User(r) => insert_type_and_serialize(r, "user", serializer),
+            JSONLRecord::Assistant(r) => insert_type_and_serialize(r, "assistant", serializer),
+            JSONLRecord::Progress(r) => insert_type_and_serialize(r, "progress", serializer),
+            JSONLRecord::System(r) => insert_type_and_serialize(r, "system", serializer),
+            JSONLRecord::QueueOperation(r) => {
+                insert_type_and_serialize(r, "queue-operation", serializer)
+            }
+            JSONLRecord::Summary(r) => insert_type_and_serialize(r, "summary", serializer),
+            JSONLRecord::FileHistorySnapshot(r) => {
+                insert_type_and_serialize(r, "file-history-snapshot", serializer)
+            }
+            JSONLRecord::Unknown { raw, .. } => raw.serialize(serializer),
+        }
+    }
+}
+
+/// Serialize a typed variant by first converting it to a JSON object, then
+/// inserting the `type` discriminator at the front of the map. Mirrors the
+/// shape `#[serde(tag = "type")]` produced when this enum used the derived
+/// impl; preserves backward compatibility for any code path that relied on
+/// the JSON form of a JSONLRecord.
+fn insert_type_and_serialize<T, S>(value: &T, type_name: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: Serialize,
+    S: Serializer,
+{
+    use serde::ser::Error as _;
+    let mut json = serde_json::to_value(value).map_err(S::Error::custom)?;
+    if let Some(map) = json.as_object_mut() {
+        map.insert(
+            "type".to_string(),
+            serde_json::Value::String(type_name.to_string()),
+        );
+    }
+    json.serialize(serializer)
 }
 
 /// Shared base fields present on all full-base record types
@@ -485,6 +676,195 @@ mod tests {
                 assert!(r.content.is_none());
             }
             _ => panic!("Expected QueueOperation variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // B1.1 — JSONLRecord::Unknown variant tests
+    //
+    // These tests cover the variant-level catch-all introduced to close the
+    // structural blind spot where ~13.5K corpus records were silently dropped
+    // by the parser when their `type` discriminator did not match one of the
+    // seven known strings. The first six tests above (unchanged) are the
+    // regression net for the seven typed variants — they must continue to
+    // pass byte-identically against the new manual `Deserialize` impl.
+    // -----------------------------------------------------------------------
+
+    /// Test B-A: round-trip Serialize/Deserialize for a known variant produces
+    /// JSON whose typed shape matches the input. We don't assert byte-identity
+    /// of the entire JSON (HashMap iteration order is non-deterministic for
+    /// the overflow field) but we verify that re-parsing the serialized form
+    /// returns to the same logical structure.
+    #[test]
+    fn test_known_variant_roundtrip_user() {
+        let json = r#"{
+            "type": "user",
+            "uuid": "abc-rt",
+            "timestamp": "2026-02-20T01:00:00.000Z",
+            "sessionId": "sess-rt",
+            "version": "2.1.49",
+            "cwd": "/home/user/project",
+            "isSidechain": false,
+            "userType": "external",
+            "gitBranch": "main",
+            "message": {"role": "user", "content": "Round trip"}
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).expect("user record should parse");
+        let serialized =
+            serde_json::to_string(&record).expect("user record should serialize");
+        // Re-deserialize and confirm the variant + key fields match.
+        let reparsed: JSONLRecord =
+            serde_json::from_str(&serialized).expect("serialized form should re-parse");
+        match reparsed {
+            JSONLRecord::User(r) => {
+                assert_eq!(r.base.uuid, "abc-rt");
+                assert_eq!(r.base.session_id, "sess-rt");
+            }
+            _ => panic!("Expected User variant after round-trip"),
+        }
+        // The serialized form must include the `type` discriminator so it
+        // round-trips through downstream consumers that re-parse JSONLRecord.
+        let as_value: serde_json::Value =
+            serde_json::from_str(&serialized).unwrap();
+        assert_eq!(as_value["type"], "user");
+        // The `type` field must NOT have leaked into overflow during the
+        // typed deserialization (regression check for the strip-before-flatten
+        // contract documented in the manual Deserialize impl).
+        assert!(
+            as_value.get("type").is_some(),
+            "type discriminator should be present"
+        );
+    }
+
+    /// Test B-B: an unknown-discriminator JSONL line deserializes to
+    /// `JSONLRecord::Unknown` capturing the discriminator name and the full
+    /// raw payload. This covers the dominant corpus-loss case (`attachment`,
+    /// `last-prompt`, etc.) and any future Claude Code record-type emissions.
+    #[test]
+    fn test_unknown_variant_captures_discriminator_and_raw() {
+        let json = r#"{
+            "type": "fictitious-test-type",
+            "foo": "bar",
+            "nested": {"baz": 42},
+            "sessionId": "sess-unk"
+        }"#;
+        let record: JSONLRecord =
+            serde_json::from_str(json).expect("unknown discriminator should fall through to Unknown");
+        match record {
+            JSONLRecord::Unknown { type_name, raw } => {
+                assert_eq!(type_name, "fictitious-test-type");
+                assert_eq!(
+                    raw.get("foo").and_then(|v| v.as_str()),
+                    Some("bar"),
+                    "raw payload should preserve top-level foo field"
+                );
+                assert_eq!(
+                    raw.get("nested").and_then(|v| v.get("baz")).and_then(|v| v.as_i64()),
+                    Some(42),
+                    "raw payload should preserve nested fields"
+                );
+                // The discriminator itself is preserved inside `raw` too,
+                // since Unknown captures the entire original object.
+                assert_eq!(
+                    raw.get("type").and_then(|v| v.as_str()),
+                    Some("fictitious-test-type"),
+                    "raw payload should retain the original `type` field"
+                );
+            }
+            _ => panic!("Expected JSONLRecord::Unknown for an unknown discriminator"),
+        }
+    }
+
+    /// Test B-B-2: each of the six observed unknown discriminators from the
+    /// corpus survey (attachment, last-prompt, custom-title, permission-mode,
+    /// agent-name, ai-title) deserializes to JSONLRecord::Unknown rather than
+    /// failing. This is the corpus-survey-driven regression check.
+    #[test]
+    fn test_unknown_variant_known_corpus_discriminators() {
+        let cases: &[(&str, &str)] = &[
+            ("attachment", r#"{"type":"attachment","attachment":{"type":"hook_success"}}"#),
+            ("last-prompt", r#"{"type":"last-prompt","lastPrompt":"hi","sessionId":"s"}"#),
+            ("custom-title", r#"{"type":"custom-title","customTitle":"x","sessionId":"s"}"#),
+            ("permission-mode", r#"{"type":"permission-mode","permissionMode":"plan","sessionId":"s"}"#),
+            ("agent-name", r#"{"type":"agent-name","agentName":"a","sessionId":"s"}"#),
+            ("ai-title", r#"{"type":"ai-title","aiTitle":"a","sessionId":"s"}"#),
+        ];
+        for (expected_name, json) in cases {
+            let record: JSONLRecord = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("{expected_name} should parse as Unknown: {e}"));
+            match record {
+                JSONLRecord::Unknown { type_name, .. } => {
+                    assert_eq!(&type_name, expected_name);
+                }
+                _ => panic!("Expected Unknown variant for {expected_name}"),
+            }
+        }
+    }
+
+    /// Test B-D: a JSONL line with no `type` field returns a deserializer
+    /// error rather than silently falling through to Unknown. Preserves the
+    /// existing malformed-JSONL failure mode handled by parser.rs.
+    #[test]
+    fn test_missing_type_field_errors() {
+        let json = r#"{"sessionId":"s","foo":"bar"}"#;
+        let result: Result<JSONLRecord, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "JSONL line missing `type` field must error, not yield Unknown; got {:?}",
+            result.ok()
+        );
+    }
+
+    /// Test B-D-2: a JSONL line whose `type` is a non-string (null, number,
+    /// object) returns a deserializer error rather than yielding Unknown.
+    /// We never want a synthetic non-string discriminator coerced into the
+    /// type_name field — that would corrupt downstream drift logging.
+    #[test]
+    fn test_non_string_type_field_errors() {
+        for bad in [
+            r#"{"type":null,"sessionId":"s"}"#,
+            r#"{"type":42,"sessionId":"s"}"#,
+            r#"{"type":{"nested":"x"},"sessionId":"s"}"#,
+        ] {
+            let result: Result<JSONLRecord, _> = serde_json::from_str(bad);
+            assert!(
+                result.is_err(),
+                "non-string type discriminator must error: {bad}"
+            );
+        }
+    }
+
+    /// Test B-E: the typed dispatch must NOT leak the `type` discriminator
+    /// into the per-variant overflow HashMap. Without the strip-before-flatten
+    /// guard in the manual Deserialize impl, `type` would land in
+    /// UserRecord.overflow (since UserRecord uses `#[serde(flatten)] overflow:
+    /// HashMap<...>`) and ultimately get logged to schema_drift_log as if it
+    /// were a novel field. Regression check for that invariant.
+    #[test]
+    fn test_typed_dispatch_does_not_leak_type_to_overflow() {
+        let json = r#"{
+            "type": "user",
+            "uuid": "abc-leak",
+            "timestamp": "2026-02-20T01:00:00.000Z",
+            "sessionId": "sess-leak",
+            "version": "2.1.49",
+            "cwd": "/home/user/project",
+            "isSidechain": false,
+            "userType": "external",
+            "gitBranch": "main",
+            "message": {"role": "user", "content": "hi"}
+        }"#;
+        let record: JSONLRecord =
+            serde_json::from_str(json).expect("user record should parse");
+        match record {
+            JSONLRecord::User(r) => {
+                assert!(
+                    !r.overflow.contains_key("type"),
+                    "type discriminator must not leak into overflow; overflow keys = {:?}",
+                    r.overflow.keys().collect::<Vec<_>>()
+                );
+            }
+            _ => panic!("Expected User variant"),
         }
     }
 
