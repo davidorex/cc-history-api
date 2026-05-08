@@ -404,3 +404,49 @@ The `attachment` variant goes back to **Claude Code 2.1.91** in this corpus. The
 4. **Will `ContentBlock` see unknown variants too, and on what timeline?** Untested. Worth a similar grep across all assistant records' content blocks before committing to a JSONL-record-only fix.
 5. **Recovery strategy for already-dropped records.** Once a fix is deployed, the existing 13,526 dropped records can be recovered by resetting `sync_metadata.last_byte_offset = 0` for the 79+ affected files and re-running sync (idempotent INSERTs are documented in `decompose.rs:1-7`). This is a one-time backfill; whether to do it (and whether to do it incrementally per file or via full DB rebuild) is a decision adjacent to the parser/decomposer fix.
 6. **CLI surfacing.** A `claude-history record-type-drift` subcommand mirroring `claude-history schema-drift` would surface the new table to users. Out of scope for the parser fix but a natural follow-on; existing precedent is in `crates/store/src/query.rs:618-629` (`get_schema_drift`) which a parallel `get_record_type_drift` would mirror.
+
+---
+
+## Addendum — per-discriminator signal-value validation
+
+**Added: 2026-05-08 06:55 Asia/Shanghai (UTC+0800)**
+
+After the report was committed, follow-on direct inspection of two of the six unknown discriminators was performed. The findings reshape priority across resolution paths.
+
+### `edited_text_file` (an `attachment` inner subtype) — high-signal, validated
+
+Direct extraction of all 80 corpus-wide instances confirms a uniform shape and high signal value.
+
+- **Schema (rigid):** envelope (full base: uuid, timestamp, sessionId, version, cwd, userType, entrypoint, gitBranch, parentUuid, isSidechain; `slug` present in 75/80) + `attachment.{type, filename, snippet}`. No overflow fields, no schema variability across the 80 records.
+- **`filename`:** absolute path on disk to a real file in the user's project tree (e.g. `/Users/david/Projects/workflowsPiExtension/.claude/worktrees/.../packages/pi-jit-agents/src/jit-runtime.smoke.test.ts`).
+- **`snippet`:** the file content, **prefixed with line numbers in tab-separated format identical to the `Read` tool output** (`1\tcontent\n2\tcontent\n…`). Length stats: min 131, median 8006, max 8223 chars. Median = 8006 strongly implies an ~8 KB hard cap; most records are at the cap (truncated views, not complete files).
+- **Extension distribution:** 30 `.ts`, 27 `.json`, 19 `.md`, 2 `.jsonl`, 1 `.output`, 1 `.js` — source files dominate.
+- **Project distribution:** 67 of 80 (84%) in `workflowsPiExtension`; 5 in `MUSE-SYNTH`; 6 in three `workflowsPiExtension/.claude/worktrees/*` subdirs; 2 in `dot-claude`. **Cross-surface analysis disproves the "CLI/Desktop collision" hypothesis**: 0 of 11 sessions containing these records have mixed entrypoints. CLI emits these in main repo paths; Claude Desktop emits them only from worktree-feature subdirs. Both surfaces use the same shared editor-integration capture path, separated by which surface hosts the conversation in which area.
+- **Mechanism (inference, well-supported):** these capture the user's active-editor file content at the moment of submitting a turn. The line-numbered Read-format snippet is identical to what a `Read` tool call would produce — Claude Code is providing the model with current editor context as a side channel without requiring an explicit Read call. This is "what the model saw" grounding that is **otherwise unrepresented in the schema** (the existing `file_operations` captures Edit/Write/Read tool *calls*, not editor-snapshot grounding).
+- **Schema-design implication:** Path C (accept loss) for this subtype is unjustified — the data is novel and unrecoverable from any other source. Path B (typed `EditedTextFile` variant) recovers full semantic content with clear FTS5 wiring potential (the snippet is text content suitable for search indexing).
+
+### `last-prompt` (top-level discriminator) — null information loss, validated
+
+Direct extraction of all 1,396 corpus-wide instances confirms this is a session-resume cache, not novel content.
+
+- **Schema (very simple, NO base envelope):** `type` (always `"last-prompt"`), `lastPrompt` (string, capped at 201 chars), `sessionId`, optional `leafUuid` (present 762/1,396 = 54.6%). All 1,396 records report `<no-version>` because the `version` field doesn't exist on these records. This shape is fundamentally different from `attachment` records.
+- **Length stats:** min 1, p25 39, median 84, p75 148, **max 201**. The hard cap at 201 is unmistakable.
+- **Cross-check (the load-bearing finding):** 30 random `last-prompt` records were sampled with non-empty content. For each, the same JSONL was scanned for a `user`-type record whose `message.content` contains the `lastPrompt` text. Result: **30 of 30 (100%) have the text already present in a kept `user` record.** This is consistent with `last-prompt` being a session-resume preview cached for UI consumption, not net-new content.
+- **Project distribution:** same skew as `edited_text_file` — 855 in `workflowsPiExtension`, with the rest spread across worktrees and other projects.
+- **Schema-design implication:** Path C (accept loss) is defensible **specifically for this discriminator**. The `lastPrompt` text is fully redundant; the `leafUuid` is derivable from `MAX(timestamp) FROM messages WHERE session_id = ?`; the `sessionId` is implicit from the JSONL filename. Promoting this would consume engineering effort for zero novel signal.
+
+### Implication for resolution-path prioritization
+
+The audit's three resolution paths remain valid as authored, but the **per-discriminator signal-value triage** changes which combination is right:
+
+| Discriminator | Validation status | Recommended treatment |
+|---|---|---|
+| `attachment` (10,085) | High signal across 22 inner subtypes; `edited_text_file` validated as novel-content; `hook_success` validated as the only hook-execution ground truth in the data model | **Path B** for high-volume subtypes (hook_success, hook_permission_decision, mcp_instructions_delta, skill_listing, edited_text_file, plan_mode*, task_reminder, todo_reminder, deferred_tools_delta) + **Path A's catch-all** for unmodeled subtypes (defense-in-depth at the inner-discriminator level too) |
+| `last-prompt` (1,371→1,396) | Null information loss validated (30/30 redundancy) | **Path C** (accept loss) — alternatively Path A's catch-all picks them up at zero cost via the same mechanism |
+| `custom-title`, `ai-title`, `permission-mode`, `agent-name` (~2,070 combined) | Unverified empirically but structurally identical to `last-prompt` (flat session-metadata, no base envelope) | **Path C** likely defensible; **Path A's catch-all** is the conservative cover |
+
+**Recommended composite resolution:** Path A (catch-all `Unknown` variant + `record_type_drift_log` table) covers the structural blind spot defensively for ALL six discriminators with low LOC. Path B specifically for `attachment` (and its high-value inner subtypes) recovers the novel semantic content that is otherwise lost. The five session-metadata discriminators do not warrant Path B individually.
+
+### Updated open question
+
+7. **Empirical validation of the four unverified session-metadata discriminators** (`custom-title`, `ai-title`, `permission-mode`, `agent-name`). The structural similarity to `last-prompt` strongly suggests redundancy, but a 30-sample cross-check per discriminator would convert the inference into validated evidence. Low-effort follow-on; not blocking either Path A or Path B.
