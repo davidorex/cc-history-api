@@ -153,9 +153,20 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` complete · `[!]` blo
 ### Tier 4 — Cleanup (technical debt, non-blocking)
 
 - [x] **D1** Move version_history backfill into sync_all *(no predecessors)*  *— landed in 6a91894: 38-line INSERT OR IGNORE block at end of sync_all (between "Sync complete" tracing and FTS rebuild); regression test test_sync_all_backfills_version_history with 3-version fixture asserting per-version session_count from sessions table. cargo test 129/129 store.*
-  - [ ] D1-Audit
-  - [ ] D1-Triage
-  - [ ] D1-Review *(gate for D4)*
+  - [x] D1-Audit  *— completed 2026-05-09: 22-row catalog. Notable: D1 production block ~36 LOC vs plan estimate "~15 LOC"; regression test (~110 LOC) lives in D1 but plan §167 assigns regression-test commit ownership to D4 (internal plan inconsistency); plan §164 wording "Move" vs impl additive interpretation (watcher's startup backfill kept; impl defers removal to D2); D1 runs backfill unconditionally on no-op syncs (defensible per impl: INSERT OR IGNORE makes it cheap); 5 verification gaps pending daemon kickstart; commit message conforms to all project conventions (61-char subject, no Co-Authored-By, no definitive language). Categories used: divergence, addition, sequence, verification, test-coverage, commit-message, documentation, meta-plan.*
+  - [x] D1-Triage  *— completed 2026-05-09: 14 dev rows + 5 meta-plan = 19. 0 omission, 6 divergence, 1 addition, 2 verification, 2 test-coverage, 8 meta-plan. 0 build-blocking, 0 test-blocking, 3 runtime-only, 16 static-only — minimal runtime impact, mostly observational. 6 plan-defect / 8 impl-defect / 5 mutual.*
+  - [x] D1-Review  *— completed 2026-05-09. Decisions per deviation:*
+    *— RESOLVED via parent-agent direct fix to plan: mp-1 (test ownership ambiguity D1 vs D4 — plan §164 updated to acknowledge D1 owns the version_history-specific regression test, D4 owns the integration test exercising D1+D3 together); mp-2 (Move vs Add — plan §164 updated from "Move" to "Add" with explicit deferral of watcher's backfill removal to D2); mp-3 (no-op sync behavior — plan §164 updated to specify backfill runs unconditionally on every sync_all invocation, INSERT OR IGNORE makes it cheap)*
+    *— RESOLVED via prior commit a6edb61 (operational policy): mp-4 (procedure for verifying independent commit when workspace uncompilable — the parallel-spawn batching policy in MEMORY.md and subagent-prompt-template.md addresses exactly this case)*
+    *— DEFERRED (lower-leverage; future plan-text revision): 20 + mp-5 (audit doc cited as D1 input has no D1-specific content; could update plan §221 input list to remove the audit-doc reference for D1 since the plan section itself is sufficient)*
+    *— IGNORE (cosmetic, behaviorally equivalent): #3 (closure-binding identifier `\|c\|` vs `\|conn\|`), #4 (log strings differ from watcher's — site-distinguishable and appropriate)*
+    *— IGNORE (test is correct, conforms to plan): #7 (placement matches commit msg), #13 (test fixture invariant of session_count=1 correctly asserted)*
+    *— IGNORE (correctly scoped out per plan): #14 (OR-IGNORE-pre-existing-row case is D3 territory)*
+    *— RECORD (LOC estimate vs actual; minor): #1 (plan ~15 LOC vs actual 36 LOC for production block — plan estimates updated above to ~30-40 LOC)*
+    *— RECORD (verification gaps pending daemon kickstart, same pattern as B1.1): #6 (live-verify procedure), #8 (regression baselines)*
+    *— RECORD (intentional engineering choice; plan now reflects): #2 (regression test in D1 — resolved by mp-1 plan update), #5 (additive interpretation — resolved by mp-2 plan update), #9 (no-op sync backfill — resolved by mp-3 plan update)*
+    *— IGNORE (non-actionable observation): #19 (workspace-broken-during-verification — resolved by policy commit a6edb61), #22 (test count discrepancy 129 vs 138 — explained by other commits between D1 and audit time)*
+    *Net: D1 implementation accepted as-is. Plan refinements applied to §164. 2 verification gaps pending daemon kickstart (separate user-authorized step). D1-Review unblocks D4 once D3 also reaches review.*
 - [ ] **D2** Sequence the daemon-startup race *(no predecessors)*  *— spawned 2026-05-09 in parallel with B1.1+D1+D3 batch; subagent stopped per mandate-008 with build failure caused by parallel-execution race against B1.1's intermediate state; WIP discarded via `git checkout` per Path III; reverted to pending*
   - [ ] D2-Audit
   - [ ] D2-Triage
