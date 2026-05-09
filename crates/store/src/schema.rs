@@ -19,6 +19,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("008", include_str!("../migrations/008_attachments.sql")),
     ("009", include_str!("../migrations/009_attachment_fts.sql")),
     ("010", include_str!("../migrations/010_plan_content.sql")),
+    ("011", include_str!("../migrations/011_plan_content_fts.sql")),
 ];
 
 /// Errors that can occur during migration application.
@@ -271,10 +272,10 @@ mod tests {
             .unwrap();
         // version_history is empty on a fresh in-memory DB (no sessions to backfill from)
         assert_eq!(vh_count, 0, "version_history should be empty on fresh DB");
-        // schema_versions should have 10 entries (one per migration after C2.1)
+        // schema_versions should have 11 entries (one per migration after C2.3)
         assert_eq!(
-            sv_count, 10,
-            "schema_versions should track all 10 applied migrations"
+            sv_count, 11,
+            "schema_versions should track all 11 applied migrations"
         );
     }
 
@@ -484,7 +485,7 @@ mod tests {
         let sv_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(sv_count, 10, "all 10 migrations should be recorded post-010");
+        assert_eq!(sv_count, 11, "all 11 migrations should be recorded post-011");
 
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -712,6 +713,206 @@ mod tests {
         assert_eq!(
             extra_json, extra_json_2,
             "cleanup UPDATE should be idempotent on replay"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration 011: Synthetic message_content rows for plan_content FTS5
+    // coverage. Backfill inserts (message_uuid, -1, 'plan_content',
+    // plan_content) for every messages row with non-NULL plan_content (C2.3).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_011_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = '011'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "migration 011 should be recorded exactly once");
+    }
+
+    #[test]
+    fn migration_011_backfills_synthetic_message_content_rows() {
+        // The migration runner's idempotency is independently covered by
+        // migration_011_idempotent. This test exercises the backfill INSERT
+        // OR IGNORE statement directly: it seeds messages rows with
+        // plan_content BEFORE migration 011 has run, then applies 011's
+        // bare SQL (the same SQL the runner applies during 011 application).
+        //
+        // Approach: replay migrations 001..010 manually (without the
+        // runner's schema_versions guard), seed plan-bearing rows, then
+        // apply 011's SQL directly. Mirrors the migration_010_backfill...
+        // test's predicate-based take_while bound for stability against
+        // future inserted-mid-sequence migrations.
+        let conn = Connection::open_in_memory().unwrap();
+        for (_version, sql) in MIGRATIONS.iter().take_while(|(v, _)| *v < "011") {
+            conn.execute_batch(sql).unwrap();
+        }
+
+        // Seed two sessions + three messages (two with plan_content, one
+        // without) so the backfill has both target and non-target rows.
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at)
+             VALUES ('sess-a', '/p/a', '2026-05-09T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp, plan_content)
+             VALUES ('msg-1', 'sess-a', 'user', '2026-05-09T00:00:00Z',
+                     '# Plan A\n\n- step one')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp, plan_content)
+             VALUES ('msg-2', 'sess-a', 'user', '2026-05-09T00:00:01Z',
+                     '# Plan B\n\nfinal')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp)
+             VALUES ('msg-3', 'sess-a', 'user', '2026-05-09T00:00:02Z')",
+            [],
+        )
+        .unwrap();
+
+        // Apply migration 011 (the INSERT OR IGNORE backfill).
+        let migration_011 = include_str!("../migrations/011_plan_content_fts.sql");
+        conn.execute_batch(migration_011).unwrap();
+
+        // Backfill assertion: exactly two synthetic message_content rows,
+        // one per plan-bearing message, both at block_index = -1 with
+        // block_type = 'plan_content'.
+        let synth_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_content
+                 WHERE block_index = -1 AND block_type = 'plan_content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            synth_count, 2,
+            "expected one synthetic row per plan-bearing message; got {synth_count}"
+        );
+
+        // Per-row text_content matches the source plan_content value.
+        let plan_a: String = conn
+            .query_row(
+                "SELECT text_content FROM message_content
+                 WHERE message_uuid = 'msg-1' AND block_index = -1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(plan_a, "# Plan A\n\n- step one");
+
+        let plan_b: String = conn
+            .query_row(
+                "SELECT text_content FROM message_content
+                 WHERE message_uuid = 'msg-2' AND block_index = -1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(plan_b, "# Plan B\n\nfinal");
+
+        // No synthetic row for the no-plan message.
+        let none_for_msg_3: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_content
+                 WHERE message_uuid = 'msg-3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            none_for_msg_3, 0,
+            "no synthetic row should be inserted for messages without plan_content"
+        );
+
+        // Idempotent-replay assertion: re-running the backfill leaves the
+        // count unchanged because UNIQUE(message_uuid, block_index) absorbs
+        // the duplicate via INSERT OR IGNORE.
+        conn.execute_batch(migration_011).unwrap();
+        let synth_count_after_replay: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_content
+                 WHERE block_index = -1 AND block_type = 'plan_content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            synth_count_after_replay, 2,
+            "INSERT OR IGNORE should keep the synthetic row count stable on replay; got {synth_count_after_replay}"
+        );
+    }
+
+    #[test]
+    fn migration_011_synthetic_row_visible_to_fts_after_rebuild() {
+        // End-to-end: backfill synthetic rows, rebuild fts_message_content,
+        // confirm a phrase from the seeded plan content matches via FTS5.
+        // This is the load-bearing search-gate that C2.3 promises.
+        let conn = migrated_conn();
+
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at)
+             VALUES ('sess-fts', '/p/fts', '2026-05-09T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp, plan_content)
+             VALUES ('msg-fts', 'sess-fts', 'user', '2026-05-09T00:00:00Z',
+                     '# Plan\n\nimplement zilliqotic-marker subsystem')",
+            [],
+        )
+        .unwrap();
+
+        // Backfill synthetic row directly (the migration's own SELECT/INSERT
+        // shape, mirrored here so the test does not depend on re-running
+        // the migration after seeding).
+        conn.execute(
+            "INSERT OR IGNORE INTO message_content
+                (message_uuid, block_index, block_type, text_content)
+             SELECT uuid, -1, 'plan_content', plan_content
+             FROM messages
+             WHERE plan_content IS NOT NULL",
+            [],
+        )
+        .unwrap();
+
+        // Rebuild fts_message_content so the synthetic row is tokenized.
+        conn.execute_batch(
+            "INSERT INTO fts_message_content(fts_message_content) VALUES('rebuild');",
+        )
+        .unwrap();
+
+        // FTS5 MATCH against a phrase known to be in the synthetic row.
+        // The unusual token zilliqotic-marker is unlikely to collide with
+        // any other test fixture and is wrapped in double quotes per the
+        // existing search-input sanitization convention.
+        let hit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts_message_content
+                 WHERE fts_message_content MATCH ?1",
+                ["\"zilliqotic-marker\""],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            hit_count >= 1,
+            "FTS5 should match the synthetic plan_content phrase; got {hit_count}"
         );
     }
 }

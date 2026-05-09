@@ -466,6 +466,26 @@ fn decompose_user(
         ],
     )?;
 
+    // 4b. Synthetic message_content row for plan_content FTS5 coverage [C2.3].
+    //     The fts_message_content virtual table externalizes
+    //     message_content.text_content; projecting plan_content into a
+    //     sentinel row at block_index = -1 with block_type = 'plan_content'
+    //     makes the existing rebuild path pick the value up automatically.
+    //     Migration 011 backfilled historical rows with the same shape; this
+    //     branch keeps live ingestion FTS-current. INSERT OR IGNORE absorbs
+    //     duplicates against the UNIQUE(message_uuid, block_index) constraint
+    //     from migration 001 — re-sync of the same JSONL line does not
+    //     duplicate the synthetic row.
+    if let Some(ref pc) = plan_content {
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO message_content
+                (message_uuid, block_index, block_type, text_content)
+             VALUES (?1, -1, 'plan_content', ?2)",
+            rusqlite::params![r.base.uuid, pc],
+        )?;
+        result.rows_inserted += inserted;
+    }
+
     // 5. Upsert agent if present
     result.rows_inserted += upsert_agent(&r.base, tx)?;
 
@@ -2343,6 +2363,85 @@ mod tests {
         assert!(
             extra_json.is_none(),
             "extra_json should be NULL when only-overflow key was promoted; got {extra_json:?}"
+        );
+
+        // C2.3: synthetic message_content row at block_index = -1 with
+        // block_type = 'plan_content' carrying the plan markdown for FTS5
+        // coverage. text_content matches the source plan_content verbatim.
+        let synthetic: Option<String> = conn
+            .query_row(
+                "SELECT text_content FROM message_content
+                 WHERE message_uuid = 'user-plan'
+                   AND block_index = -1
+                   AND block_type = 'plan_content'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        assert_eq!(
+            synthetic.as_deref(),
+            Some("# Plan\n\nDo the thing in three steps."),
+            "C2.3 synthetic message_content row should mirror plan_content"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17b'' (C2.3): Idempotent re-decompose of a plan-bearing user
+    //          record produces no duplicate synthetic message_content row.
+    //          INSERT OR IGNORE against UNIQUE(message_uuid, block_index)
+    //          from migration 001 absorbs the second insert.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_plan_content_synthetic_row_idempotent() {
+        let conn = setup_db();
+
+        let mut overflow = HashMap::new();
+        overflow.insert(
+            "planContent".to_string(),
+            serde_json::json!("# Plan\n\nidempotent path"),
+        );
+
+        let record = UserRecord {
+            base: test_base("user-plan-idem", "sess-plan-idem"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("idempotent plan record".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow,
+        };
+
+        // First decompose.
+        let tx = conn.unchecked_transaction().unwrap();
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        // Second decompose of the same record (simulates re-sync of the
+        // same JSONL line, which the byte-offset tracking generally
+        // prevents but which the codebase still defends against via
+        // INSERT OR IGNORE on the messages PK).
+        let tx2 = conn.unchecked_transaction().unwrap();
+        decompose_user(&record, &tx2).unwrap();
+        tx2.commit().unwrap();
+
+        // Exactly one synthetic row remains.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_content
+                 WHERE message_uuid = 'user-plan-idem'
+                   AND block_index = -1
+                   AND block_type = 'plan_content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "INSERT OR IGNORE should keep synthetic-row cardinality at one across re-decompose; got {count}"
         );
     }
 

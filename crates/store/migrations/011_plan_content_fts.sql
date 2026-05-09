@@ -1,0 +1,73 @@
+-- Migration 011: Synthetic message_content rows for plan_content FTS5
+-- coverage. C2.3 in the curious-napping-koala plan.
+--
+-- C2.1 (migration 010) promoted user.planContent into a typed
+-- messages.plan_content TEXT column. The catch-all messages.extra_json was
+-- never indexed by FTS5, so plan-content prose was ingested-but-invisible
+-- to the existing search surfaces. Promotion alone does not change that:
+-- the fts_message_content virtual table (migration 002) externalizes
+-- message_content.text_content, not messages.plan_content.
+--
+-- The shape chosen here keeps FTS wiring minimal: rather than create a
+-- second FTS5 table for plan_content, we project plan_content into
+-- message_content as a synthetic row keyed by (message_uuid, block_index)
+-- where block_index is a sentinel value of -1 and block_type is the
+-- discriminator string 'plan_content'. The existing rebuild path
+-- (rebuild_fts_index, INSERT INTO fts_message_content(...) VALUES('rebuild'))
+-- then picks the synthetic row up automatically because it externalizes
+-- message_content.text_content as a whole — no FTS-side change required.
+--
+-- Sentinel block_index = -1 selection rationale:
+--   Real content blocks from decompose_message_content use 0-based ascending
+--   indices (block_index >= 0). The pre-migration message_content corpus
+--   shows MIN(block_index) = 0, MAX(block_index) = 7 in a representative
+--   3.4 GB DB snapshot. -1 has never been emitted by the real-block path
+--   and cannot collide with future real-block emissions because
+--   decompose_content_block uses Vec<_>::iter().enumerate() which is
+--   non-negative by type. Choosing -1 over (e.g.) i64::MIN keeps the value
+--   readable in ad-hoc SQL inspection while remaining unambiguous.
+--
+-- UNIQUE constraint reuse:
+--   message_content already carries UNIQUE(message_uuid, block_index) from
+--   migration 001. INSERT OR IGNORE against (message_uuid, -1, ...)
+--   therefore short-circuits silently on replay; no additional index is
+--   required by this migration. Per-row cardinality is at most one
+--   synthetic plan_content row per message because every messages row has a
+--   single plan_content column value (or NULL).
+--
+-- Backfill query:
+--   SELECT every messages row with non-NULL plan_content (~81 in the
+--   corpus snapshot at C2.3-spawn time; live count may have drifted) and
+--   INSERT OR IGNORE into message_content with the sentinel triple. The
+--   text_content column receives the literal plan_content value so FTS5
+--   tokenization happens at rebuild time, identical to how it would for
+--   any real message-text block.
+--
+-- Decomposer-side parity (NOT in this SQL — see crates/store/src/decompose.rs):
+--   decompose_user is extended in this commit so newly-ingested plan_content
+--   rows also receive the synthetic message_content row at decompose-time.
+--   That keeps live ingestion FTS-current after the next FTS rebuild,
+--   without requiring this migration to re-run on each ingestion.
+--
+-- Replay safety:
+--   - The migration runner's schema_versions guard prevents re-application
+--     in normal operation.
+--   - INSERT OR IGNORE is the data-side idempotency mechanism: even if the
+--     migration were applied twice (e.g., a corrupt schema_versions row
+--     forced a replay), the existing UNIQUE(message_uuid, block_index)
+--     constraint on message_content would silently absorb the duplicate.
+--   - The decomposer extension also uses INSERT OR IGNORE for the same
+--     reason — re-syncing a JSONL file with a plan_content user record
+--     does not insert a duplicate synthetic row.
+--
+-- FTS rebuild expectation:
+--   This migration does not rebuild the FTS index. Rebuild happens in the
+--   watcher's existing 30 s loop (rebuild_fts_index in fts.rs). After
+--   first watcher rebuild post-deployment, plan_content phrases become
+--   matchable via fts_message_content MATCH. Pre-rebuild, the synthetic
+--   rows exist in message_content but have not yet been tokenized.
+
+INSERT OR IGNORE INTO message_content (message_uuid, block_index, block_type, text_content)
+SELECT uuid, -1, 'plan_content', plan_content
+FROM messages
+WHERE plan_content IS NOT NULL;
