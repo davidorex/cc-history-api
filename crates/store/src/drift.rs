@@ -1110,13 +1110,24 @@ mod tests {
     }
 
     /// decompose_record dispatches a JSONLRecord::Attachment to
-    /// decompose_attachment. For modeled subtypes this is currently a
-    /// no-op (C1.1 stub; C1.2 lands the table writes). For unknown inner
-    /// subtypes it writes to record_type_drift_log with the qualified
-    /// type_name. This test exercises both paths via the dispatcher to
-    /// catch any wiring regressions.
+    /// decompose_attachment. C1.2 activates the previously-stubbed routing:
+    /// modeled subtypes now write rows to `attachments` and (for hook
+    /// subtypes) `hook_executions`. Unknown inner subtypes still write to
+    /// `record_type_drift_log` with the qualified type_name, and now also
+    /// land a row in `attachments` carrying the raw body. This test
+    /// exercises the modeled-subtype path through the dispatcher; the
+    /// Unknown-subtype path is covered by
+    /// `test_decompose_record_attachment_unknown_subtype_writes_drift_row`
+    /// below and by the per-subtype suite in `decompose::tests`.
+    ///
+    /// Renamed from the C1.1-era
+    /// `test_decompose_record_attachment_modeled_is_stub_no_op_on_typed_tables`
+    /// to reflect the inverted contract; the original asserted zero rows
+    /// were written to `attachments` and `hook_executions` (the stub-no-op
+    /// invariant). The test name is now stable across future commits in
+    /// the C1 cluster.
     #[test]
-    fn test_decompose_record_attachment_modeled_is_stub_no_op_on_typed_tables() {
+    fn test_decompose_record_attachment_modeled_writes_typed_tables() {
         use crate::decompose::decompose_record;
 
         let conn = setup_db();
@@ -1141,26 +1152,30 @@ mod tests {
         let result = decompose_record(&record, "sess-stub", &tx).unwrap();
         tx.commit().unwrap();
 
-        // C1.1 contract: modeled-subtype dispatch does not yet write to
-        // attachments or hook_executions. C1.2 will change this.
+        // C1.2 contract: modeled-subtype dispatch writes one row each to
+        // `attachments` and `hook_executions` (for hook subtypes).
         let attachments_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            attachments_count, 0,
-            "C1.1 stub must NOT write to attachments — that is C1.2's job"
+            attachments_count, 1,
+            "C1.2 must write one attachments row for a modeled subtype"
         );
         let hook_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM hook_executions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            hook_count, 0,
-            "C1.1 stub must NOT write to hook_executions — that is C1.2's job"
+            hook_count, 1,
+            "C1.2 must write one hook_executions row for a hook_success body"
         );
 
-        // No drift-log row either, because the modeled body has no overflow
-        // and is not Unknown. The result struct should reflect this.
-        assert_eq!(result.overflow_fields, 0);
+        // No drift-log overflow_fields increment expected: the modeled body
+        // carries no envelope or inner overflow in this fixture, and the
+        // body is not Unknown.
+        assert_eq!(
+            result.overflow_fields, 0,
+            "no overflow / drift signal expected for an exhaustively-modeled fixture"
+        );
     }
 
     #[test]
