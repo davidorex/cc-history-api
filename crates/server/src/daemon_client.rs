@@ -32,8 +32,8 @@ use crate::api::health::HealthResponse;
 use claude_history_store::artifact_queries::{FileEntry, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{
-    MessageResult, ModelStats, RecordTypeDriftEntry, SessionSummary, TokenStats, ToolStats,
-    VersionDriftGroup, VersionHistoryEntry,
+    AttachmentRow, HookExecutionRow, MessageResult, ModelStats, RecordTypeDriftEntry,
+    SessionSummary, TokenStats, ToolStats, VersionDriftGroup, VersionHistoryEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -535,6 +535,86 @@ impl DaemonClient {
         session_id: &str,
     ) -> Result<SessionArtifacts, DaemonError> {
         let path = format!("/v1/artifacts/{}", urlencoded(session_id));
+        self.get(&path).await
+    }
+
+    // -------------------------------------------------------------------
+    // Attachments + hook_executions endpoint methods (C1.4)
+    // -------------------------------------------------------------------
+
+    /// GET /v1/attachments — list attachments with optional filters.
+    ///
+    /// Supports optional project, inner_type, since, and limit parameters.
+    pub async fn attachments_list(
+        &self,
+        project: Option<&str>,
+        inner_type: Option<&str>,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<AttachmentRow>, DaemonError> {
+        let mut params = Vec::new();
+        if let Some(p) = project {
+            params.push(format!("project={}", urlencoded(p)));
+        }
+        if let Some(it) = inner_type {
+            params.push(format!("inner_type={}", urlencoded(it)));
+        }
+        if let Some(s) = since {
+            params.push(format!("since={}", urlencoded(s)));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        let path = if params.is_empty() {
+            "/v1/attachments".to_string()
+        } else {
+            format!("/v1/attachments?{}", params.join("&"))
+        };
+        self.get(&path).await
+    }
+
+    /// GET /v1/attachments/{uuid} — fetch a single attachment by uuid.
+    ///
+    /// Returns `Ok(None)` when the daemon responds 404 — distinguishing the
+    /// "not found" semantic from transport errors.
+    pub async fn attachment_show(
+        &self,
+        uuid: &str,
+    ) -> Result<Option<AttachmentRow>, DaemonError> {
+        let path = format!("/v1/attachments/{}", urlencoded(uuid));
+        match self.get::<AttachmentRow>(&path).await {
+            Ok(row) => Ok(Some(row)),
+            Err(DaemonError::Api { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// GET /v1/hook-executions — list hook execution rows with optional filters.
+    pub async fn hook_executions_list(
+        &self,
+        tool_use_id: Option<&str>,
+        hook_event: Option<&str>,
+        exit_code: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<Vec<HookExecutionRow>, DaemonError> {
+        let mut params = Vec::new();
+        if let Some(tid) = tool_use_id {
+            params.push(format!("tool_use_id={}", urlencoded(tid)));
+        }
+        if let Some(he) = hook_event {
+            params.push(format!("hook_event={}", urlencoded(he)));
+        }
+        if let Some(ec) = exit_code {
+            params.push(format!("exit_code={}", ec));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        let path = if params.is_empty() {
+            "/v1/hook-executions".to_string()
+        } else {
+            format!("/v1/hook-executions?{}", params.join("&"))
+        };
         self.get(&path).await
     }
 }

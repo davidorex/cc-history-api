@@ -107,6 +107,55 @@ pub struct RecordTypeDriftEntry {
     pub occurrence_count: i64,
 }
 
+/// One row from the `attachments` table (migration 008) projected for the
+/// CLI / REST / MCP list and show surfaces added in C1.4.
+///
+/// Mirrors the `attachments` envelope shape verbatim; the inner subtype body
+/// remains opaque-JSON in `body_json` (raw text — the typed `AttachmentBody`
+/// enum lives in the core crate and is not pulled into the store query layer
+/// to keep this surface dependency-light).
+///
+/// The `body_json` field is `Option<String>` because some modeled subtypes
+/// (e.g. those whose entire payload is captured in the envelope) may store
+/// `NULL` per migration 008's schema. Callers that need typed inspection
+/// should round-trip through `core::record::AttachmentRecord` separately.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AttachmentRow {
+    pub uuid: String,
+    pub session_id: String,
+    pub parent_uuid: Option<String>,
+    pub timestamp: String,
+    pub cwd: Option<String>,
+    pub version: Option<String>,
+    pub git_branch: Option<String>,
+    pub slug: Option<String>,
+    pub entrypoint: Option<String>,
+    pub inner_type: String,
+    pub body_json: Option<String>,
+}
+
+/// One row from the `hook_executions` table (migration 008) projected for
+/// the CLI / REST / MCP list surface added in C1.4.
+///
+/// All decomposed columns from migration 008 are surfaced. Nullable columns
+/// are `Option<...>` to faithfully represent the table's NULL-allowed shape
+/// — `tool_use_id` in particular is naturally NULL for
+/// hook_permission_decision rows where no tool_use is attached.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HookExecutionRow {
+    pub id: i64,
+    pub attachment_uuid: String,
+    pub hook_name: Option<String>,
+    pub hook_event: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub command: Option<String>,
+    pub decision: Option<String>,
+}
+
 /// Detailed session information for the API `GET /sessions/:id` endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionDetail {
@@ -694,6 +743,185 @@ pub fn record_type_drift_list(
             first_seen_at: row.get(3)?,
             last_seen_at: row.get(4)?,
             occurrence_count: row.get(5)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// List attachment rows with optional filters.
+///
+/// Returns rows from the `attachments` table (migration 008) ordered by
+/// `timestamp` descending (most recent first). Filters narrow the result set:
+/// - `project`: substring match against `sessions.project_path` (joined via
+///   `attachments.session_id`). Sessions with NULL project_path do not match
+///   the substring filter (LIKE on NULL yields NULL → row omitted).
+/// - `inner_type`: exact match against `attachments.inner_type` (e.g.
+///   `hook_success`, `mcp_instructions_delta`).
+/// - `since`: lower bound (inclusive) on `attachments.timestamp` (ISO-8601
+///   text matching the format the decomposer writes).
+/// - `limit`: cap on rows returned.
+///
+/// All filters bind via parameterized SQL; user-provided values are not
+/// interpolated.
+pub fn attachments_list(
+    conn: &Connection,
+    project: Option<&str>,
+    inner_type: Option<&str>,
+    since: Option<&str>,
+    limit: usize,
+) -> Result<Vec<AttachmentRow>, rusqlite::Error> {
+    let mut sql = String::from(
+        "SELECT a.uuid, a.session_id, a.parent_uuid, a.timestamp, a.cwd,
+                a.version, a.git_branch, a.slug, a.entrypoint, a.inner_type,
+                a.body_json
+         FROM attachments a
+         LEFT JOIN sessions s ON s.session_id = a.session_id
+         WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(p) = project {
+        // Substring match on project_path. LIKE-vs-NULL evaluates to NULL,
+        // so sessions with no project_path naturally drop out — that matches
+        // the existing `list_sessions` precedent where project filter is a
+        // LIKE expression rather than an IS NULL OR LIKE compound.
+        sql.push_str(" AND s.project_path LIKE ?");
+        let escaped = p.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        sql.push_str(" ESCAPE '\\'");
+        params.push(Box::new(format!("%{}%", escaped)));
+    }
+
+    if let Some(it) = inner_type {
+        sql.push_str(" AND a.inner_type = ?");
+        params.push(Box::new(it.to_string()));
+    }
+
+    if let Some(s) = since {
+        sql.push_str(" AND a.timestamp >= ?");
+        params.push(Box::new(s.to_string()));
+    }
+
+    sql.push_str(" ORDER BY a.timestamp DESC LIMIT ?");
+    params.push(Box::new(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|b| b.as_ref()).collect();
+    let results = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(AttachmentRow {
+            uuid: row.get(0)?,
+            session_id: row.get(1)?,
+            parent_uuid: row.get(2)?,
+            timestamp: row.get(3)?,
+            cwd: row.get(4)?,
+            version: row.get(5)?,
+            git_branch: row.get(6)?,
+            slug: row.get(7)?,
+            entrypoint: row.get(8)?,
+            inner_type: row.get(9)?,
+            body_json: row.get(10)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// Fetch a single attachment row by uuid.
+///
+/// Returns `Ok(None)` if no row matches — distinguishing "not found" from
+/// "query failed" so REST/CLI callers can return 404 vs 500 cleanly.
+pub fn attachment_by_uuid(
+    conn: &Connection,
+    uuid: &str,
+) -> Result<Option<AttachmentRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT uuid, session_id, parent_uuid, timestamp, cwd, version,
+                git_branch, slug, entrypoint, inner_type, body_json
+         FROM attachments
+         WHERE uuid = ?",
+    )?;
+
+    stmt.query_row(rusqlite::params![uuid], |row| {
+        Ok(AttachmentRow {
+            uuid: row.get(0)?,
+            session_id: row.get(1)?,
+            parent_uuid: row.get(2)?,
+            timestamp: row.get(3)?,
+            cwd: row.get(4)?,
+            version: row.get(5)?,
+            git_branch: row.get(6)?,
+            slug: row.get(7)?,
+            entrypoint: row.get(8)?,
+            inner_type: row.get(9)?,
+            body_json: row.get(10)?,
+        })
+    })
+    .optional()
+}
+
+/// List hook_executions rows with optional filters.
+///
+/// Returns rows from the `hook_executions` table (migration 008) ordered by
+/// `id` descending — newer rows first, matching insertion order under the
+/// AUTOINCREMENT column. Filters:
+/// - `tool_use_id`: exact match against `hook_executions.tool_use_id`.
+///   Useful for joining a single tool_executions row to its hook events.
+/// - `hook_event`: exact match against `hook_executions.hook_event`
+///   (e.g. `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`).
+/// - `exit_code`: exact match against `hook_executions.exit_code`.
+/// - `limit`: cap on rows returned.
+///
+/// All filters bind via parameterized SQL.
+pub fn hook_executions_list(
+    conn: &Connection,
+    tool_use_id: Option<&str>,
+    hook_event: Option<&str>,
+    exit_code: Option<i64>,
+    limit: usize,
+) -> Result<Vec<HookExecutionRow>, rusqlite::Error> {
+    let mut sql = String::from(
+        "SELECT id, attachment_uuid, hook_name, hook_event, tool_use_id,
+                exit_code, duration_ms, stdout, stderr, command, decision
+         FROM hook_executions
+         WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(tid) = tool_use_id {
+        sql.push_str(" AND tool_use_id = ?");
+        params.push(Box::new(tid.to_string()));
+    }
+
+    if let Some(he) = hook_event {
+        sql.push_str(" AND hook_event = ?");
+        params.push(Box::new(he.to_string()));
+    }
+
+    if let Some(ec) = exit_code {
+        sql.push_str(" AND exit_code = ?");
+        params.push(Box::new(ec));
+    }
+
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    params.push(Box::new(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|b| b.as_ref()).collect();
+    let results = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(HookExecutionRow {
+            id: row.get(0)?,
+            attachment_uuid: row.get(1)?,
+            hook_name: row.get(2)?,
+            hook_event: row.get(3)?,
+            tool_use_id: row.get(4)?,
+            exit_code: row.get(5)?,
+            duration_ms: row.get(6)?,
+            stdout: row.get(7)?,
+            stderr: row.get(8)?,
+            command: row.get(9)?,
+            decision: row.get(10)?,
         })
     })?;
 
@@ -1850,5 +2078,179 @@ mod tests {
             record_type_drift_list(&conn, None, None, Some("2026-04-15T00:00:00"), None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].type_name, "new-type");
+    }
+
+    // -----------------------------------------------------------------------
+    // attachments_list / attachment_by_uuid / hook_executions_list — C1.4
+    //
+    // These exercise the parameterized SQL paths that the new CLI / REST /
+    // MCP surfaces consume. Filters covered: project substring, inner_type
+    // exact match, since lower bound, limit truncation, attachment_by_uuid
+    // hit + miss, hook_executions tool_use_id / hook_event / exit_code
+    // filters, and ordering.
+    // -----------------------------------------------------------------------
+
+    fn seed_session(conn: &Connection, session_id: &str, project_path: Option<&str>) {
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (session_id, project_path, first_seen_at)
+             VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+            rusqlite::params![session_id, project_path],
+        )
+        .unwrap();
+    }
+
+    fn seed_attachment(
+        conn: &Connection,
+        uuid: &str,
+        session_id: &str,
+        timestamp: &str,
+        inner_type: &str,
+        body_json: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO attachments
+             (uuid, session_id, parent_uuid, timestamp, cwd, version, git_branch,
+              slug, entrypoint, inner_type, body_json)
+             VALUES (?1, ?2, NULL, ?3, NULL, NULL, NULL, NULL, NULL, ?4, ?5)",
+            rusqlite::params![uuid, session_id, timestamp, inner_type, body_json],
+        )
+        .unwrap();
+    }
+
+    fn seed_hook_execution(
+        conn: &Connection,
+        attachment_uuid: &str,
+        hook_event: Option<&str>,
+        tool_use_id: Option<&str>,
+        exit_code: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO hook_executions
+             (attachment_uuid, hook_name, hook_event, tool_use_id, exit_code,
+              duration_ms, stdout, stderr, command, decision)
+             VALUES (?1, NULL, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL)",
+            rusqlite::params![attachment_uuid, hook_event, tool_use_id, exit_code],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_attachments_list_no_filters_orders_by_timestamp_desc() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        seed_attachment(&conn, "att-a", "s-1", "2026-05-01T00:00:00Z", "hook_success", Some("{}"));
+        seed_attachment(&conn, "att-b", "s-1", "2026-05-03T00:00:00Z", "skill_listing", None);
+        seed_attachment(&conn, "att-c", "s-1", "2026-05-02T00:00:00Z", "hook_success", Some("{}"));
+
+        let rows = attachments_list(&conn, None, None, None, 50).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].uuid, "att-b", "newest first");
+        assert_eq!(rows[1].uuid, "att-c");
+        assert_eq!(rows[2].uuid, "att-a");
+    }
+
+    #[test]
+    fn test_attachments_list_inner_type_filter() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        seed_attachment(&conn, "att-a", "s-1", "2026-05-01T00:00:00Z", "hook_success", Some("{}"));
+        seed_attachment(&conn, "att-b", "s-1", "2026-05-02T00:00:00Z", "skill_listing", None);
+
+        let rows = attachments_list(&conn, None, Some("hook_success"), None, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uuid, "att-a");
+    }
+
+    #[test]
+    fn test_attachments_list_project_substring_filter() {
+        let conn = setup_db();
+        seed_session(&conn, "s-alpha", Some("/Users/dev/Projects/alpha"));
+        seed_session(&conn, "s-beta", Some("/Users/dev/Projects/beta"));
+        seed_attachment(&conn, "att-a", "s-alpha", "2026-05-01T00:00:00Z", "hook_success", Some("{}"));
+        seed_attachment(&conn, "att-b", "s-beta", "2026-05-02T00:00:00Z", "hook_success", Some("{}"));
+
+        let rows = attachments_list(&conn, Some("alpha"), None, None, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uuid, "att-a");
+    }
+
+    #[test]
+    fn test_attachments_list_since_and_limit() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        seed_attachment(&conn, "att-a", "s-1", "2026-04-01T00:00:00Z", "hook_success", None);
+        seed_attachment(&conn, "att-b", "s-1", "2026-05-01T00:00:00Z", "hook_success", None);
+        seed_attachment(&conn, "att-c", "s-1", "2026-06-01T00:00:00Z", "hook_success", None);
+
+        let rows =
+            attachments_list(&conn, None, None, Some("2026-04-15T00:00:00Z"), 50).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Newest first.
+        assert_eq!(rows[0].uuid, "att-c");
+        assert_eq!(rows[1].uuid, "att-b");
+
+        // Limit caps the result.
+        let limited = attachments_list(&conn, None, None, None, 1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].uuid, "att-c");
+    }
+
+    #[test]
+    fn test_attachment_by_uuid_hit_and_miss() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", None);
+        seed_attachment(
+            &conn,
+            "att-a",
+            "s-1",
+            "2026-05-01T00:00:00Z",
+            "skill_listing",
+            Some(r#"{"name":"x"}"#),
+        );
+
+        let hit = attachment_by_uuid(&conn, "att-a").unwrap();
+        assert!(hit.is_some());
+        let row = hit.unwrap();
+        assert_eq!(row.inner_type, "skill_listing");
+        assert_eq!(row.body_json.as_deref(), Some(r#"{"name":"x"}"#));
+
+        let miss = attachment_by_uuid(&conn, "does-not-exist").unwrap();
+        assert!(miss.is_none());
+    }
+
+    #[test]
+    fn test_hook_executions_list_no_filters() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", None);
+        seed_attachment(&conn, "att-a", "s-1", "2026-05-01T00:00:00Z", "hook_success", None);
+        seed_hook_execution(&conn, "att-a", Some("PreToolUse"), Some("tu-1"), Some(0));
+        seed_hook_execution(&conn, "att-a", Some("PostToolUse"), Some("tu-1"), Some(0));
+
+        let rows = hook_executions_list(&conn, None, None, None, 50).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_hook_executions_list_filters_combine() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", None);
+        seed_attachment(&conn, "att-a", "s-1", "2026-05-01T00:00:00Z", "hook_success", None);
+        seed_hook_execution(&conn, "att-a", Some("PreToolUse"), Some("tu-1"), Some(0));
+        seed_hook_execution(&conn, "att-a", Some("PostToolUse"), Some("tu-1"), Some(0));
+        seed_hook_execution(&conn, "att-a", Some("PostToolUse"), Some("tu-2"), Some(2));
+
+        let pre = hook_executions_list(&conn, None, Some("PreToolUse"), None, 50).unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].tool_use_id.as_deref(), Some("tu-1"));
+
+        let by_tu = hook_executions_list(&conn, Some("tu-1"), None, None, 50).unwrap();
+        assert_eq!(by_tu.len(), 2);
+
+        let by_exit = hook_executions_list(&conn, None, None, Some(2), 50).unwrap();
+        assert_eq!(by_exit.len(), 1);
+        assert_eq!(by_exit[0].tool_use_id.as_deref(), Some("tu-2"));
+
+        let limited = hook_executions_list(&conn, None, None, None, 2).unwrap();
+        assert_eq!(limited.len(), 2);
     }
 }

@@ -8,11 +8,13 @@
 
 pub mod analytics;
 pub mod artifacts_api;
+pub mod attachments;
 pub mod error;
 pub mod export_api;
 pub mod files;
 pub mod git;
 pub mod health;
+pub mod hook_executions;
 pub mod messages;
 pub mod projects;
 pub mod schema;
@@ -151,6 +153,12 @@ pub fn build_router(state: SharedState) -> Router {
             "/v1/artifacts/{session_id}/timeline",
             get(artifacts_api::session_timeline),
         )
+        // Attachments [C1.4]
+        // IMPORTANT: register before path-parameter routes that could shadow.
+        .route("/v1/attachments", get(attachments::list))
+        .route("/v1/attachments/{uuid}", get(attachments::show))
+        // Hook executions [C1.4]
+        .route("/v1/hook-executions", get(hook_executions::list))
         // Events (SSE)
         .route("/v1/events", get(events::events_handler))
         // Middleware

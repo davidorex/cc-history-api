@@ -273,6 +273,29 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// List or show attachment rows from the attachments table (C1.4)
+    Attachments {
+        #[command(subcommand)]
+        action: AttachmentsAction,
+    },
+    /// List hook_executions rows (C1.4)
+    HookExecutions {
+        /// Filter by exact tool_use_id
+        #[arg(long)]
+        tool_use_id: Option<String>,
+        /// Filter by exact hook_event (PreToolUse, PostToolUse, UserPromptSubmit, Stop)
+        #[arg(long)]
+        hook_event: Option<String>,
+        /// Filter by exact exit_code
+        #[arg(long)]
+        exit_code: Option<i64>,
+        /// Maximum rows to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage and run canned SQL queries
     #[command(after_long_help = QUERIES_SCHEMA_HELP)]
     Queries {
@@ -306,6 +329,36 @@ enum McpClient {
     Windsurf,
     /// Zed (~/.config/zed/settings.json)
     Zed,
+}
+
+#[derive(Subcommand)]
+enum AttachmentsAction {
+    /// List attachment rows with optional filters
+    List {
+        /// Filter by project path (substring match)
+        #[arg(long)]
+        project: Option<String>,
+        /// Filter by exact attachment inner_type (e.g. hook_success)
+        #[arg(long)]
+        inner_type: Option<String>,
+        /// Show attachments after this timestamp (ISO-8601)
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum rows to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show full envelope + body_json for a single attachment by uuid
+    Show {
+        /// Attachment UUID
+        uuid: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -469,26 +522,28 @@ const EXPORT_HELP: &str = r#"EXAMPLES:
 const MCP_STDIO_HELP: &str = r#"Runs claude-history as an MCP (Model Context Protocol) server communicating
 over stdin/stdout. This is how Claude Desktop and Claude Code connect.
 
-13 TOOLS AVAILABLE:
+15 TOOLS AVAILABLE:
 
   Discovery:
-    list_sessions     Browse sessions by project, date range
-    list_files        Find files by path substring and/or project
-    list_queries      Discover available canned SQL queries
-    list_bookmarks    Browse bookmarks from ClaudeHistoryBrowser
-    get_stats         Token usage, tool frequency, model breakdown
+    list_sessions       Browse sessions by project, date range
+    list_files          Find files by path substring and/or project
+    list_queries        Discover available canned SQL queries
+    list_bookmarks      Browse bookmarks from ClaudeHistoryBrowser
+    list_attachments    List attachment rows with project/inner_type/since filters
+    get_stats           Token usage, tool frequency, model breakdown
 
   Deep queries:
-    search_messages   FTS5 full-text search across all message content
-    query_messages    Filter messages by session, type, model, tool, date
-    file_history      Chronological operations on a file (substring path match)
-    git_log           Git operations extracted from Bash tool calls
-    get_bookmark      Retrieve a bookmark by ID or assistant message UUID
-    search_bookmarks  Search bookmarks by label or tag text
+    search_messages     FTS5 full-text search across all message + attachment content
+    query_messages      Filter messages by session, type, model, tool, date
+    file_history        Chronological operations on a file (substring path match)
+    git_log             Git operations extracted from Bash tool calls
+    get_bookmark        Retrieve a bookmark by ID or assistant message UUID
+    search_bookmarks    Search bookmarks by label or tag text
+    get_hook_executions List hook_executions rows by tool_use_id/hook_event/exit_code
 
   Power tools:
-    execute_sql       Read-only SQL passthrough (any SELECT query)
-    run_query         Execute named canned queries with parameter binding
+    execute_sql         Read-only SQL passthrough (any SELECT query)
+    run_query           Execute named canned queries with parameter binding
 
 CONFIGURATION:
 
@@ -812,6 +867,16 @@ async fn main() -> ExitCode {
                 } => run_git_log(mode, session_id, operation_type, limit, json).await,
                 Commands::Artifacts { session_id, json } => {
                     run_artifacts(mode, session_id, json).await
+                }
+                Commands::Attachments { action } => run_attachments(mode, action).await,
+                Commands::HookExecutions {
+                    tool_use_id,
+                    hook_event,
+                    exit_code,
+                    limit,
+                    json,
+                } => {
+                    run_hook_executions(mode, tool_use_id, hook_event, exit_code, limit, json).await
                 }
                 // Serve, Sync, Queries, McpStdio, and McpConfig already handled above.
                 Commands::Serve { .. } | Commands::Sync { .. } | Commands::Queries { .. } | Commands::McpStdio | Commands::McpConfig { .. } => unreachable!(),
@@ -1592,6 +1657,209 @@ async fn run_record_type_drift(
         }
     } else {
         output::print_record_type_drift(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Dispatch the `attachments` subcommand to its `list` or `show` action.
+///
+/// Each action routes through the daemon HTTP API when available, falling
+/// back to a direct DB connection. Output format is JSON via `--json` or a
+/// human-readable table / labelled-block via `output::print_attachments_*`.
+async fn run_attachments(mode: ConnectionMode, action: AttachmentsAction) -> ExitCode {
+    match action {
+        AttachmentsAction::List {
+            project,
+            inner_type,
+            since,
+            limit,
+            json,
+        } => run_attachments_list(mode, project, inner_type, since, limit, json).await,
+        AttachmentsAction::Show { uuid, json } => run_attachments_show(mode, uuid, json).await,
+    }
+}
+
+async fn run_attachments_list(
+    mode: ConnectionMode,
+    project: Option<String>,
+    inner_type: Option<String>,
+    since: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing attachments list through daemon"
+            );
+            match client
+                .attachments_list(
+                    project.as_deref(),
+                    inner_type.as_deref(),
+                    since.as_deref(),
+                    Some(limit),
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon attachments list failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let project_owned = project.clone();
+            let inner_type_owned = inner_type.clone();
+            let since_owned = since.clone();
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::attachments_list(
+                        conn,
+                        project_owned.as_deref(),
+                        inner_type_owned.as_deref(),
+                        since_owned.as_deref(),
+                        limit,
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Attachments list query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_attachments_table(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+async fn run_attachments_show(mode: ConnectionMode, uuid: String, json: bool) -> ExitCode {
+    let result = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing attachments show through daemon"
+            );
+            match client.attachment_show(&uuid).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon attachment show failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let uuid_owned = uuid.clone();
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::attachment_by_uuid(conn, &uuid_owned)
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Attachment show query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    match result {
+        None => {
+            eprintln!("Attachment not found: {}", uuid);
+            ExitCode::FAILURE
+        }
+        Some(row) => {
+            if json {
+                if output::print_json(&row).is_err() {
+                    return ExitCode::FAILURE;
+                }
+            } else {
+                output::print_attachment_show(&row);
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// List rows from the `hook_executions` table (migration 008).
+///
+/// Routes through the daemon HTTP API when available, falling back to a
+/// direct DB connection. Output via `--json` or a human-readable table.
+async fn run_hook_executions(
+    mode: ConnectionMode,
+    tool_use_id: Option<String>,
+    hook_event: Option<String>,
+    exit_code: Option<i64>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing hook-executions through daemon"
+            );
+            match client
+                .hook_executions_list(
+                    tool_use_id.as_deref(),
+                    hook_event.as_deref(),
+                    exit_code,
+                    Some(limit),
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon hook-executions query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let tool_use_id_owned = tool_use_id.clone();
+            let hook_event_owned = hook_event.clone();
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::hook_executions_list(
+                        conn,
+                        tool_use_id_owned.as_deref(),
+                        hook_event_owned.as_deref(),
+                        exit_code,
+                        limit,
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Hook-executions query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_hook_executions(&results);
     }
 
     ExitCode::SUCCESS

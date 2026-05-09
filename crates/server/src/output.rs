@@ -13,8 +13,8 @@ use chrono::{DateTime, Local, Utc};
 use claude_history_store::artifact_queries::{FileEntry, FileOperation, GitOperation, SessionArtifacts};
 use claude_history_store::fts::{SearchResult, SearchResultSource};
 use claude_history_store::query::{
-    ModelStats, RecordTypeDriftEntry, SessionSummary, TokenStats, ToolStats, VersionDriftGroup,
-    VersionHistoryEntry,
+    AttachmentRow, HookExecutionRow, ModelStats, RecordTypeDriftEntry, SessionSummary, TokenStats,
+    ToolStats, VersionDriftGroup, VersionHistoryEntry,
 };
 
 /// Convert a UTC timestamp string to local time for display.
@@ -556,6 +556,151 @@ pub fn print_record_type_drift(entries: &[RecordTypeDriftEntry]) {
         println!(
             "{:<24}  {:<10}  {:>11}  {:<19}  {:<60}",
             type_display, version_truncated, entry.occurrence_count, last_seen, sample_display
+        );
+    }
+}
+
+/// Print attachment rows in a column-aligned table (C1.4).
+///
+/// Columns: UUID (8 chars), TIMESTAMP (local time), INNER_TYPE (24 chars),
+/// SESSION (8 chars), VERSION (10 chars). The body_json is intentionally
+/// omitted from the table; callers wanting the full body should use
+/// `--json` or the `attachments show <uuid>` subcommand.
+pub fn print_attachments_table(rows: &[AttachmentRow]) {
+    if rows.is_empty() {
+        println!("No attachments found.");
+        return;
+    }
+
+    println!(
+        "{:<8}  {:<19}  {:<24}  {:<8}  {:<10}",
+        "UUID", "TIMESTAMP", "INNER_TYPE", "SESSION", "VERSION"
+    );
+    println!(
+        "{:<8}  {:<19}  {:<24}  {:<8}  {:<10}",
+        "--------",
+        "-------------------",
+        "------------------------",
+        "--------",
+        "----------"
+    );
+
+    for r in rows {
+        let uuid_short = if r.uuid.len() > 8 { &r.uuid[..8] } else { &r.uuid };
+        let session_short = if r.session_id.len() > 8 {
+            &r.session_id[..8]
+        } else {
+            &r.session_id
+        };
+        let inner_type_display = if r.inner_type.len() > 24 {
+            &r.inner_type[..24]
+        } else {
+            &r.inner_type
+        };
+        let version = r.version.as_deref().unwrap_or("-");
+        let version_truncated = if version.len() > 10 { &version[..10] } else { version };
+
+        println!(
+            "{:<8}  {:<19}  {:<24}  {:<8}  {:<10}",
+            uuid_short,
+            to_local(&r.timestamp),
+            inner_type_display,
+            session_short,
+            version_truncated
+        );
+    }
+}
+
+/// Print a single attachment row in a section-formatted block (C1.4).
+///
+/// Renders the envelope fields as labelled lines and pretty-prints
+/// `body_json` if present. Used by `claude-history attachments show <uuid>`
+/// for human-readable terminal output.
+pub fn print_attachment_show(row: &AttachmentRow) {
+    println!("UUID:        {}", row.uuid);
+    println!("SESSION:     {}", row.session_id);
+    println!(
+        "PARENT:      {}",
+        row.parent_uuid.as_deref().unwrap_or("-")
+    );
+    println!("TIMESTAMP:   {}", to_local(&row.timestamp));
+    println!("CWD:         {}", row.cwd.as_deref().unwrap_or("-"));
+    println!(
+        "VERSION:     {}",
+        row.version.as_deref().unwrap_or("-")
+    );
+    println!(
+        "GIT_BRANCH:  {}",
+        row.git_branch.as_deref().unwrap_or("-")
+    );
+    println!("SLUG:        {}", row.slug.as_deref().unwrap_or("-"));
+    println!(
+        "ENTRYPOINT:  {}",
+        row.entrypoint.as_deref().unwrap_or("-")
+    );
+    println!("INNER_TYPE:  {}", row.inner_type);
+    println!("---");
+    match row.body_json.as_deref() {
+        Some(b) => match serde_json::from_str::<serde_json::Value>(b) {
+            Ok(v) => match serde_json::to_string_pretty(&v) {
+                Ok(s) => println!("{}", s),
+                Err(_) => println!("{}", b),
+            },
+            Err(_) => println!("{}", b),
+        },
+        None => println!("(no body_json)"),
+    }
+}
+
+/// Print hook execution rows in a column-aligned table (C1.4).
+///
+/// Columns: ID (right-aligned), HOOK_EVENT (18 chars), TOOL_USE_ID (24 chars),
+/// EXIT_CODE (right-aligned), DURATION_MS (right-aligned), DECISION (12 chars).
+/// stdout/stderr/command are intentionally omitted from the table for
+/// readability; callers wanting full payloads should use `--json`.
+pub fn print_hook_executions(rows: &[HookExecutionRow]) {
+    if rows.is_empty() {
+        println!("No hook executions found.");
+        return;
+    }
+
+    println!(
+        "{:>6}  {:<18}  {:<24}  {:>9}  {:>11}  {:<12}",
+        "ID", "HOOK_EVENT", "TOOL_USE_ID", "EXIT_CODE", "DURATION_MS", "DECISION"
+    );
+    println!(
+        "{:>6}  {:<18}  {:<24}  {:>9}  {:>11}  {:<12}",
+        "------",
+        "------------------",
+        "------------------------",
+        "---------",
+        "-----------",
+        "------------"
+    );
+
+    for r in rows {
+        let event = r.hook_event.as_deref().unwrap_or("-");
+        let event_truncated = if event.len() > 18 { &event[..18] } else { event };
+        let tu = r.tool_use_id.as_deref().unwrap_or("-");
+        let tu_truncated = if tu.len() > 24 { &tu[..24] } else { tu };
+        let exit_display = r
+            .exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let duration_display = r
+            .duration_ms
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let decision = r.decision.as_deref().unwrap_or("-");
+        let decision_truncated = if decision.len() > 12 {
+            &decision[..12]
+        } else {
+            decision
+        };
+
+        println!(
+            "{:>6}  {:<18}  {:<24}  {:>9}  {:>11}  {:<12}",
+            r.id, event_truncated, tu_truncated, exit_display, duration_display, decision_truncated
         );
     }
 }

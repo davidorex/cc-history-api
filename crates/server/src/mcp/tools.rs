@@ -134,6 +134,33 @@ pub struct GetBookmarkParams {
     pub project: Option<String>,
 }
 
+/// Parameters for the `list_attachments` MCP tool (C1.4).
+#[derive(Deserialize, JsonSchema)]
+pub struct ListAttachmentsParams {
+    /// Filter by project path (substring match against sessions.project_path)
+    pub project: Option<String>,
+    /// Filter by exact attachment inner_type discriminator (e.g. hook_success,
+    /// skill_listing, mcp_instructions_delta, edited_text_file, nested_memory)
+    pub inner_type: Option<String>,
+    /// Lower bound on attachments.timestamp (ISO-8601 text)
+    pub since: Option<String>,
+    /// Maximum rows to return (default 50)
+    pub limit: Option<usize>,
+}
+
+/// Parameters for the `get_hook_executions` MCP tool (C1.4).
+#[derive(Deserialize, JsonSchema)]
+pub struct GetHookExecutionsParams {
+    /// Filter by exact tool_use_id (joins to tool_executions.tool_use_id)
+    pub tool_use_id: Option<String>,
+    /// Filter by exact hook_event (e.g. PreToolUse, PostToolUse, UserPromptSubmit, Stop)
+    pub hook_event: Option<String>,
+    /// Filter by exact exit_code
+    pub exit_code: Option<i64>,
+    /// Maximum rows to return (default 50)
+    pub limit: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // McpService
 // ---------------------------------------------------------------------------
@@ -460,6 +487,58 @@ impl McpService {
         .await
         .map_err(|e| McpError::internal_error(format!("Task join error: {e}"), None))?
         .map_err(db_error)?;
+        json_result(&results)
+    }
+
+    #[tool(description = "List attachment rows from the attachments table (migration 008). Filters: project (substring match against sessions.project_path), inner_type (exact match on the AttachmentBody discriminator e.g. hook_success, skill_listing, mcp_instructions_delta), since (ISO-8601 timestamp lower bound), limit (default 50). Returns attachment envelope rows ordered by timestamp DESC; body_json is included as raw JSON text.")]
+    async fn list_attachments(
+        &self,
+        Parameters(params): Parameters<ListAttachmentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = params.limit.unwrap_or(50);
+        let project = params.project;
+        let inner_type = params.inner_type;
+        let since = params.since;
+        let results = self
+            .state
+            .conn
+            .call(move |conn| {
+                claude_history_store::query::attachments_list(
+                    conn,
+                    project.as_deref(),
+                    inner_type.as_deref(),
+                    since.as_deref(),
+                    limit,
+                )
+            })
+            .await
+            .map_err(db_error)?;
+        json_result(&results)
+    }
+
+    #[tool(description = "List rows from the hook_executions table (migration 008) — flat per-hook records produced by decomposing hook_success and hook_permission_decision attachments. Filters: tool_use_id (exact match, joins to tool_executions), hook_event (e.g. PreToolUse, PostToolUse, UserPromptSubmit, Stop), exit_code (exact match), limit (default 50). Returns rows ordered by id DESC.")]
+    async fn get_hook_executions(
+        &self,
+        Parameters(params): Parameters<GetHookExecutionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = params.limit.unwrap_or(50);
+        let tool_use_id = params.tool_use_id;
+        let hook_event = params.hook_event;
+        let exit_code = params.exit_code;
+        let results = self
+            .state
+            .conn
+            .call(move |conn| {
+                claude_history_store::query::hook_executions_list(
+                    conn,
+                    tool_use_id.as_deref(),
+                    hook_event.as_deref(),
+                    exit_code,
+                    limit,
+                )
+            })
+            .await
+            .map_err(db_error)?;
         json_result(&results)
     }
 
