@@ -300,13 +300,29 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` complete · `[!]` blo
     *— RECORD (verification gaps pending daemon kickstart, same pattern as B1.1+D1+D2+D3): #37 (live-ingestion latency check), #38 (no-new-WARN check)*
     *Net: D4 implementation accepted as-is. Plan refinement applied to §167 D4 line. 1 test-coverage gap (assertion specificity) recorded for potential follow-up commit. 2 verification gaps pending daemon kickstart. D4-Review closes the Tier 4 chain (D1+D2+D3+D4 all complete). With B1.1 also closed, only Tier 2 B1.2 → Tier 3 work remains.*
 
-### Initial unblocked starting points (six)
+### Post-roadmap operational addendum
+
+**As of: 2026-05-09 16:24 Asia/Shanghai (post-kickstart, post-CLAUDE.md/README refresh).**
+
+The 23-commit roadmap is structurally complete (last review: C2.6-Review at d8f5ca1). The C2.6-Review entry's "Pending operational steps" list has resolved as follows:
+
+- **Daemon kickstart** — DONE 2026-05-09 16:13. PID 60855 → 11364. Migrations 008+009+010+011 all applied at 08:13:39-40 UTC (the schema_versions timestamp is the daemon's UTC-clock time; the wall-clock kickstart was 16:13 local). Backup at `/tmp/claude-history.db.bak-d8f5ca1` (3.1 GB) retained for rollback. /v1/health returned 200 in ~2s. err.log shows clean migration application + sync_all completion + version_history backfill + 0 panics + 0 ERROR-level lines.
+- **CLAUDE.md cleanup pass** (tool-count drift 10 → 17) — DONE in 859af69. Same commit creates the project's first README.md (87 lines, blandly factual). Remaining drift (mcpb/manifest.json) is bundle-state and resolves at next MCPB UI install.
+- **MCPB rebundle UI install** — STILL USER-PENDING. Bundle at `mcpb/mcpb.mcpb` is the post-C2.6 binary (was post-baf8ee5 + 5d8f934 + 6143fbf when 658b345 packed it; the binary at PID 11364 supersedes that bundle's binary, so the bundle is now stale relative to live daemon). To ship the post-C2.6 surface (typed Attachment + plan_content + 17 MCP tools) to Claude Desktop, the bundle needs a re-pack against `target/release/claude-history` post-d8f5ca1 + manifest version bump (0.1.1 → 0.1.2) + drag into Claude Desktop → Settings → Extensions.
+- **Post-kickstart live verification** — DONE for the gates each commit's review entry recorded. Sync currency: 9232/9246 JSONL files synced, 14 0-byte empty files correctly skipped; last sync 08:19:43 UTC; watcher live. Retrieval surfaces all functional: /v1/health, /v1/schema/record-type-drift, /v1/attachments, /v1/hook-executions, /v1/plans, /v1/plans/search, /v1/search (union path); CLI `record-type-drift`, `plans list/show`, `sessions --has-plan`, `search` route through daemon. FTS5 search returns BM25-ranked snippets with `>>>highlight<<<` markers. 81 plan_content rows fully searchable post-mig-011 backfill.
+
+**New pending architectural debt surfaced post-kickstart**:
+
+- [ ] **C1-attachments-backfill**: typed-Attachment infrastructure (C1.1+C1.2) is live but ~13,395 historical attachment records remain in `record_type_drift_log` only — the typed `attachments` + `hook_executions` tables hold only 48 newly-ingested rows (since 16:13 kickstart). `fts_attachment_text_content` is empty. Closing the gap requires B1.2-style bytewise re-ingestion of the 241 affected files (list at `/tmp/b1.2-affected-files.txt`, still resident). Detailed mechanics + operating process documented in MEMORY.md "Attachment Table Backfill Gap" section. Expected post-backfill state: `attachments` ~13K rows; `hook_executions` ~9K rows; `fts_attachment_text_content` populated for the 4 indexed subtypes (mcp_instructions_delta + skill_listing + edited_text_file + nested_memory). User-pending authorization.
+- [ ] **ContentBlock inner-discriminator blind spot**: structurally identical to the JSONLRecord-level Unknown gap that B1.1 closed, but at the inner content-block level (MessageContent + ContentBlock enums in `crates/core/src/message.rs`). Empirically observed post-resume: `data did not match any variant of untagged enum MessageContent` for word-roots project records. Resolution shape mirrors B1.1: ~150 LOC for manual two-pass Deserialize + Unknown { block_type, raw } catch-all variant + inner-discriminator drift logging via record_type_drift_log namespace `content_block.<block_type>`. No new migration; no new tables; no new CLI/MCP/REST surfacing (drift-log-side already covers via record-type-drift). Detailed framing in MEMORY.md "Architectural Blind Spot — Unknown Discriminators" section.
+
+### Initial unblocked starting points (six) — historical
 
 ```
 A1, A2, B1.1, D1, D2, D3
 ```
 
-Any of these may be authorized first; none block any other. Authorization for each spawn is the user's per the plan file's Execution model section.
+Any of these may be authorized first; none block any other. **All six shipped**; this enumeration is preserved as the cross-session-rebuild starting reference.
 
 ### Cross-session rebuild procedure
 
