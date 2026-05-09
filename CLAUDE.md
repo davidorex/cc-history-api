@@ -26,7 +26,7 @@ launchctl load   -w ~/Library/LaunchAgents/com.davidrex.claude-history.plist
 
 **Do NOT** `pgrep -f 'claude-history serve' | xargs kill` then `claude-history serve &`. Killing the supervised process triggers a launchd respawn within `ThrottleInterval` (10 s); a manual `serve &` then races the respawn for port 7424 and the UDS socket, leaving the system in a confusing state. Use `launchctl kickstart -k` instead — it cleanly terminates and replaces the supervised process atomically.
 
-If the LaunchAgent is not yet installed on a new machine, the `claude-history serve` binary still runs as a foreground process (per `crates/server/src/serve.rs:69-70`); installing the plist is what gives it supervision.
+If the LaunchAgent is not yet installed on a new machine, the `claude-history serve` binary still runs as a foreground process (per `run_server` in `crates/server/src/serve.rs`); installing the plist is what gives it supervision.
 
 If seed queries in `queries/` were modified, copy them to `~/.claude/claude-history/queries/`.
 
@@ -46,4 +46,4 @@ The daemon exposes an MCP endpoint at `/mcp` (streamable HTTP transport). For Cl
 claude-history mcp-stdio
 ```
 
-10 tools: search_messages, list_sessions, query_messages, list_files, file_history, git_log, get_stats, execute_sql, run_query, list_queries.
+17 tools: search_messages, list_sessions, query_messages, list_files, file_history, git_log, get_stats, execute_sql, run_query, list_queries, list_bookmarks, search_bookmarks, get_bookmark, list_attachments, get_hook_executions, list_plans, get_plan.
