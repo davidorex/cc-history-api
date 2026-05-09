@@ -220,7 +220,7 @@ mod tests {
             let count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
                 .expect("should count schema_versions");
-            assert_eq!(count, 7, "Should still have exactly 7 migration versions (001-007) after second init");
+            assert_eq!(count, 8, "Should still have exactly 8 migration versions (001-008) after second init");
             Ok::<(), rusqlite::Error>(())
         })
         .await

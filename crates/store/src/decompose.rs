@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use claude_history_core::message::{ContentBlock, MessageContent, UsageStats};
 use claude_history_core::progress::ProgressRecord;
 use claude_history_core::record::{
-    AssistantRecord, FileHistorySnapshotRecord, JSONLRecord, QueueOperationRecord, RecordBase,
-    SummaryRecord, UserRecord,
+    AssistantRecord, AttachmentBody, AttachmentRecord, FileHistorySnapshotRecord, JSONLRecord,
+    QueueOperationRecord, RecordBase, SummaryRecord, UserRecord,
 };
 use claude_history_core::system::SystemRecord;
 use rusqlite::Transaction;
@@ -66,6 +66,7 @@ pub fn decompose_record(
         JSONLRecord::FileHistorySnapshot(r) => {
             decompose_file_history_snapshot(r, session_id_from_file, tx)?
         }
+        JSONLRecord::Attachment(r) => decompose_attachment(r, tx)?,
         JSONLRecord::Unknown { type_name, raw } => decompose_unknown(type_name, raw, tx)?,
     };
 
@@ -798,6 +799,73 @@ fn decompose_unknown(
     // with field-level drift observations.
     result.overflow_fields = changed;
 
+    Ok(result)
+}
+
+/// Decompose a `JSONLRecord::Attachment` variant.
+///
+/// **C1.1 stub.** This commit creates `JSONLRecord::Attachment` and the
+/// `attachments` + `hook_executions` tables (migration 008) but intentionally
+/// does NOT yet write rows into those tables. Table population is the
+/// responsibility of C1.2, which adds per-subtype helpers and routing for
+/// the 12 modeled `AttachmentBody` variants plus the catch-all body_json
+/// path for unmodeled subtypes.
+///
+/// What this stub DOES do:
+///
+/// 1. For modeled `AttachmentBody` variants — currently no-op. C1.2 will
+///    extend this arm to populate `attachments` (envelope + inner_type) and,
+///    for `hook_success` / `hook_permission_decision`, `hook_executions`.
+///
+/// 2. For `AttachmentBody::Unknown` — log a row to `record_type_drift_log`
+///    with `record_type = "attachment.<subtype>"`. This is the inner-
+///    discriminator catch-all that the plan §C1.1 describes ("Path A's
+///    pattern applied at the inner discriminator level"). Without this,
+///    unmodeled subtypes shipping in C1.1 would silently disappear once
+///    C1.2 begins populating the typed tables and stops routing them to
+///    the existing `attachment` row in record_type_drift_log.
+///
+/// The pattern follows `decompose_unknown` above (B1.1 precedent).
+///
+/// Returns `DecomposeResult { rows_inserted: 0, overflow_fields: <changed> }`
+/// where `changed` is 0 for modeled subtypes (the stub does not write yet)
+/// and 1 for the Unknown subtype's drift-log row insert/update.
+fn decompose_attachment(
+    record: &AttachmentRecord,
+    tx: &Transaction,
+) -> Result<DecomposeResult, DecomposeError> {
+    let mut result = DecomposeResult::default();
+
+    // Inner-discriminator catch-all: route unmodeled subtypes through
+    // record_type_drift_log with a qualified type_name so the drift log can
+    // surface attachment-subtype-specific drops distinctly from outer-level
+    // unknowns. Per the plan, this prevents the C1.2 transition from
+    // silently dropping inner subtypes that the 12-variant set does not yet
+    // cover.
+    if let AttachmentBody::Unknown { subtype, raw } = &record.attachment {
+        let type_name = format!("attachment.{subtype}");
+        let raw_json = serde_json::to_string(raw)?;
+        let sample_value = if raw_json.len() > RECORD_TYPE_SAMPLE_MAX_LEN {
+            let mut cut = RECORD_TYPE_SAMPLE_MAX_LEN;
+            while !raw_json.is_char_boundary(cut) && cut > 0 {
+                cut -= 1;
+            }
+            format!("{}...", &raw_json[..cut])
+        } else {
+            raw_json
+        };
+        let changed = drift::log_record_type_drift(
+            &type_name,
+            record.version.as_deref(),
+            &sample_value,
+            tx,
+        )?;
+        result.overflow_fields = changed;
+    }
+
+    // Modeled subtypes: C1.2 fills in routing here. Intentionally a no-op
+    // for now — the variant deserializes correctly per C1.1, but the
+    // attachments + hook_executions tables remain empty until C1.2 ships.
     Ok(result)
 }
 

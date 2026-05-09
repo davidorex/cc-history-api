@@ -16,6 +16,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("005", include_str!("../migrations/005_drop_noise.sql")),
     ("006", include_str!("../migrations/006_version_monitoring.sql")),
     ("007", include_str!("../migrations/007_record_type_drift.sql")),
+    ("008", include_str!("../migrations/008_attachments.sql")),
 ];
 
 /// Errors that can occur during migration application.
@@ -268,10 +269,10 @@ mod tests {
             .unwrap();
         // version_history is empty on a fresh in-memory DB (no sessions to backfill from)
         assert_eq!(vh_count, 0, "version_history should be empty on fresh DB");
-        // schema_versions should have 7 entries (one per migration)
+        // schema_versions should have 8 entries (one per migration after C1.1)
         assert_eq!(
-            sv_count, 7,
-            "schema_versions should track all 7 applied migrations"
+            sv_count, 8,
+            "schema_versions should track all 8 applied migrations"
         );
     }
 
@@ -351,5 +352,144 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "migration 007 should be recorded exactly once");
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration 008: attachments + hook_executions tables (C1.1 structural
+    // foundation; decomposer routing lands in C1.2).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_008_creates_attachments_table() {
+        let conn = migrated_conn();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'attachments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "attachments table should exist after migration 008");
+    }
+
+    #[test]
+    fn migration_008_creates_hook_executions_table() {
+        let conn = migrated_conn();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'hook_executions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            exists,
+            "hook_executions table should exist after migration 008"
+        );
+    }
+
+    #[test]
+    fn migration_008_attachments_columns_queryable() {
+        let conn = migrated_conn();
+        conn.execute_batch(
+            "SELECT uuid, session_id, parent_uuid, timestamp, cwd, version,
+                    git_branch, slug, entrypoint, inner_type, body_json
+             FROM attachments LIMIT 0",
+        )
+        .expect("attachments should have all expected columns after migration 008");
+    }
+
+    #[test]
+    fn migration_008_hook_executions_columns_queryable() {
+        let conn = migrated_conn();
+        conn.execute_batch(
+            "SELECT id, attachment_uuid, hook_name, hook_event, tool_use_id,
+                    exit_code, duration_ms, stdout, stderr, command, decision
+             FROM hook_executions LIMIT 0",
+        )
+        .expect("hook_executions should have all expected columns after migration 008");
+    }
+
+    #[test]
+    fn migration_008_attachments_indices_present() {
+        let conn = migrated_conn();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'attachments'")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for expected in [
+            "idx_attachments_session_id",
+            "idx_attachments_inner_type",
+            "idx_attachments_timestamp",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing index {expected}; have {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_008_hook_executions_indices_present() {
+        let conn = migrated_conn();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'hook_executions'")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for expected in [
+            "idx_hook_executions_tool_use_id",
+            "idx_hook_executions_attachment_uuid",
+            "idx_hook_executions_hook_event",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing index {expected}; have {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_008_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = '008'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "migration 008 should be recorded exactly once");
+    }
+
+    /// Integrity check after all migrations, verifying that schema_versions
+    /// itself reflects the new count and that PRAGMA integrity_check still
+    /// returns "ok". Replaces the implicit "should still have exactly 7"
+    /// expectation that B1.1 set after migration 007 with the C1.1-era count.
+    #[test]
+    fn migration_008_post_apply_integrity() {
+        let conn = migrated_conn();
+        let sv_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sv_count, 8, "all 8 migrations should be recorded post-008");
+
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            integrity, "ok",
+            "PRAGMA integrity_check should return 'ok' after all migrations"
+        );
     }
 }

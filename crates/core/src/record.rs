@@ -21,10 +21,12 @@ use crate::system::SystemRecord;
 
 /// Top-level discriminated union for all JSONL line types.
 ///
-/// The JSON `type` field selects the variant. Seven known discriminator values
-/// dispatch to typed variants; any other string-valued discriminator falls
-/// through to [`JSONLRecord::Unknown`], which preserves the original
-/// discriminator name and the entire raw JSON object so the data is not lost.
+/// The JSON `type` field selects the variant. Eight known discriminator values
+/// dispatch to typed variants (the seven historical full/partial/lightweight
+/// shapes plus `attachment`, modeled by C1.1 with a 12-subtype inner body
+/// enum). Any other string-valued discriminator falls through to
+/// [`JSONLRecord::Unknown`], which preserves the original discriminator name
+/// and the entire raw JSON object so the data is not lost.
 ///
 /// The dispatch is implemented by a hand-rolled `Deserialize` impl below,
 /// not by `#[serde(tag = "type")]`. The two-pass dispatch — deserialize to
@@ -39,10 +41,10 @@ use crate::system::SystemRecord;
 /// string, return a deserializer error — preserving the existing
 /// malformed-JSONL failure mode handled by `crates/core/src/parser.rs`.
 ///
-/// The seven typed variants must continue to deserialize byte-identically to
-/// the previous `#[derive(Deserialize)] #[serde(tag = "type")]` behavior; the
-/// existing test suite at the bottom of this file exercises each variant and
-/// is the regression net for that invariant.
+/// The seven historical typed variants must continue to deserialize
+/// byte-identically to the previous `#[derive(Deserialize)] #[serde(tag = "type")]`
+/// behavior; the existing test suite at the bottom of this file exercises each
+/// variant and is the regression net for that invariant.
 #[derive(Debug, Clone)]
 pub enum JSONLRecord {
     User(UserRecord),
@@ -52,17 +54,25 @@ pub enum JSONLRecord {
     QueueOperation(QueueOperationRecord),
     Summary(SummaryRecord),
     FileHistorySnapshot(FileHistorySnapshotRecord),
+    /// Attachment record introduced as a typed variant in C1.1. Carries an
+    /// `AttachmentBody` whose own discriminator (`attachment.type`) selects
+    /// one of 12 modeled subtypes covering ~97% of attachment records by
+    /// volume. Subtypes outside the modeled set fall through to
+    /// [`AttachmentBody::Unknown`] (a Path-A pattern applied at the inner
+    /// discriminator level) so the parent record still deserializes intact
+    /// and the unmodeled subtype is recoverable downstream.
+    Attachment(AttachmentRecord),
     /// Catch-all for JSONL lines whose `type` discriminator is a string but
-    /// not one of the seven known values (e.g. `attachment`, `last-prompt`,
-    /// `custom-title`, `permission-mode`, `agent-name`, `ai-title`, or any
-    /// future record type). Preserves both the discriminator name and the
-    /// full raw JSON object so the bytes are recoverable downstream.
+    /// not one of the eight known values (e.g. `last-prompt`, `custom-title`,
+    /// `permission-mode`, `agent-name`, `ai-title`, or any future record
+    /// type). Preserves both the discriminator name and the full raw JSON
+    /// object so the bytes are recoverable downstream.
     ///
     /// Variant placement: this is the LAST variant in the enum so adding it
     /// does not shift the position of any prior typed variant in the source
-    /// — important because the manual `Deserialize` impl checks the seven
-    /// known discriminators by string match and order is irrelevant there,
-    /// but match-arm ordering elsewhere in the codebase remains stable.
+    /// — important because the manual `Deserialize` impl checks the known
+    /// discriminators by string match and order is irrelevant there, but
+    /// match-arm ordering elsewhere in the codebase remains stable.
     Unknown {
         type_name: String,
         raw: serde_json::Value,
@@ -71,7 +81,7 @@ pub enum JSONLRecord {
 
 /// Discriminator value -> typed variant dispatch.
 ///
-/// Returns `Some` if the input is one of the seven known JSONL record-type
+/// Returns `Some` if the input is one of the eight known JSONL record-type
 /// strings, `None` otherwise. Centralized so the manual `Deserialize` impl
 /// and any future call site (e.g. validation, telemetry) read from one source.
 fn known_record_type(type_name: &str) -> Option<KnownRecordType> {
@@ -83,11 +93,12 @@ fn known_record_type(type_name: &str) -> Option<KnownRecordType> {
         "queue-operation" => Some(KnownRecordType::QueueOperation),
         "summary" => Some(KnownRecordType::Summary),
         "file-history-snapshot" => Some(KnownRecordType::FileHistorySnapshot),
+        "attachment" => Some(KnownRecordType::Attachment),
         _ => None,
     }
 }
 
-/// Internal enum naming the seven known record types. Used only by the
+/// Internal enum naming the eight known record types. Used only by the
 /// manual `Deserialize` impl to keep the dispatch table tidy; not exported.
 #[derive(Debug, Clone, Copy)]
 enum KnownRecordType {
@@ -98,6 +109,7 @@ enum KnownRecordType {
     QueueOperation,
     Summary,
     FileHistorySnapshot,
+    Attachment,
 }
 
 impl<'de> Deserialize<'de> for JSONLRecord {
@@ -169,6 +181,11 @@ impl<'de> Deserialize<'de> for JSONLRecord {
                         .map(JSONLRecord::FileHistorySnapshot)
                         .map_err(de::Error::custom)
                 }
+                KnownRecordType::Attachment => {
+                    serde_json::from_value::<AttachmentRecord>(typed_value)
+                        .map(JSONLRecord::Attachment)
+                        .map_err(de::Error::custom)
+                }
             };
         }
 
@@ -210,6 +227,7 @@ impl Serialize for JSONLRecord {
             JSONLRecord::FileHistorySnapshot(r) => {
                 insert_type_and_serialize(r, "file-history-snapshot", serializer)
             }
+            JSONLRecord::Attachment(r) => insert_type_and_serialize(r, "attachment", serializer),
             JSONLRecord::Unknown { raw, .. } => raw.serialize(serializer),
         }
     }
@@ -361,6 +379,448 @@ pub struct FileHistorySnapshotRecord {
     #[serde(default)]
     pub is_snapshot_update: bool,
     /// Catches any unknown fields
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+// =============================================================================
+// C1.1 — AttachmentRecord + AttachmentBody (12 modeled subtypes)
+//
+// `attachment` records carry a nested `attachment` object whose own `type`
+// field acts as the inner discriminator. The outer envelope (uuid, sessionId,
+// timestamp, cwd, version, gitBranch, slug, parentUuid, entrypoint) mirrors
+// the shape of the historical full-base records but with no `message`/`subtype`
+// payload — the payload lives entirely under `attachment`.
+//
+// AttachmentBody enumerates the 12 subtypes that the C1.1 corpus survey
+// observed at >=10 records each (covering ~9,800 of 10,085 records, ~97% by
+// volume). The remaining ~10 subtypes (~85 records, <1%) fall through to
+// AttachmentBody::Unknown via the manual Deserialize impl, mirroring the
+// Path-A two-pass dispatch from JSONLRecord above. C1.2 is responsible for
+// routing modeled subtypes to typed columns in the `attachments` and
+// `hook_executions` tables; unmodeled subtypes ride in `attachments.body_json`
+// and additionally log to `record_type_drift_log` with
+// `record_type = "attachment.<subtype>"` so future promotion is data-driven.
+//
+// Field selection per subtype tracks the plan's §C1.1 table exactly. Fields
+// observed in real records but not enumerated by the plan (e.g. `removedNames`
+// on `mcp_instructions_delta`, `skillCount`/`isInitial` on `skill_listing`,
+// `addedLines`/`readdedNames` on `deferred_tools_delta`,
+// `contentDiffersFromDisk` inside `nested_memory.content`) are captured by
+// each subtype struct's #[serde(flatten)] HashMap so they remain queryable
+// downstream without expanding the modeled schema in C1.1.
+// =============================================================================
+
+/// An `attachment`-discriminated JSONL record.
+///
+/// The envelope fields mirror those observed on real attachment records in the
+/// corpus: `uuid`, `sessionId`, `timestamp`, `cwd`, `version`, `gitBranch`,
+/// `slug`, `parentUuid`, `entrypoint`, `userType`, `isSidechain`, plus the
+/// nested `attachment` body. Some fields are optional because not every
+/// attachment subtype carries every envelope field (e.g. some `task_reminder`
+/// records observed without `slug`); `#[serde(default)]` plus `Option` keeps
+/// missing-field deserialization permissive without dropping data.
+///
+/// The catch-all `overflow` HashMap captures any envelope-level field that is
+/// not yet enumerated here (e.g. `agentId` was observed on some
+/// `deferred_tools_delta` records). This mirrors the overflow-capture pattern
+/// used by `UserRecord`, `AssistantRecord`, etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRecord {
+    pub uuid: String,
+    pub timestamp: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub parent_uuid: Option<String>,
+    #[serde(default)]
+    pub is_sidechain: bool,
+    #[serde(default)]
+    pub user_type: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    /// The inner discriminated body. Twelve subtypes are modeled; unknown
+    /// subtypes deserialize to [`AttachmentBody::Unknown`].
+    pub attachment: AttachmentBody,
+    /// Catch-all for envelope-level fields not enumerated above.
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// Inner discriminated body of an `AttachmentRecord`.
+///
+/// The 12 modeled variants correspond exactly to the table in plan §C1.1.
+/// The [`AttachmentBody::Unknown`] variant is the inner-discriminator
+/// equivalent of [`JSONLRecord::Unknown`] — it preserves the unmodeled
+/// subtype name and the full raw body so future promotion has a
+/// representative sample. The dispatch is implemented by a hand-rolled
+/// `Deserialize` impl below mirroring the two-pass pattern on `JSONLRecord`.
+#[derive(Debug, Clone)]
+pub enum AttachmentBody {
+    HookSuccess(HookSuccessBody),
+    HookPermissionDecision(HookPermissionDecisionBody),
+    McpInstructionsDelta(McpInstructionsDeltaBody),
+    SkillListing(SkillListingBody),
+    EditedTextFile(EditedTextFileBody),
+    TaskReminder(TaskReminderBody),
+    TodoReminder(TodoReminderBody),
+    DeferredToolsDelta(DeferredToolsDeltaBody),
+    PlanMode(PlanModeBody),
+    PlanModeExit(PlanModeExitBody),
+    PlanModeReentry(PlanModeBody),
+    NestedMemory(NestedMemoryBody),
+    /// Inner-discriminator catch-all. Preserves the unmodeled subtype name
+    /// and the raw body JSON so downstream forensic logging can record the
+    /// drop into `record_type_drift_log` with `record_type =
+    /// "attachment.<subtype>"`. This is the C1.1 application of the Path-A
+    /// pattern at the inner level: an unmodeled inner subtype should not
+    /// fail the parent record's deserialization.
+    Unknown {
+        subtype: String,
+        raw: serde_json::Value,
+    },
+}
+
+/// Discriminator value -> typed inner-body dispatch. Mirrors
+/// [`known_record_type`] but for the 12 modeled subtypes.
+fn known_attachment_subtype(subtype: &str) -> Option<KnownAttachmentSubtype> {
+    match subtype {
+        "hook_success" => Some(KnownAttachmentSubtype::HookSuccess),
+        "hook_permission_decision" => Some(KnownAttachmentSubtype::HookPermissionDecision),
+        "mcp_instructions_delta" => Some(KnownAttachmentSubtype::McpInstructionsDelta),
+        "skill_listing" => Some(KnownAttachmentSubtype::SkillListing),
+        "edited_text_file" => Some(KnownAttachmentSubtype::EditedTextFile),
+        "task_reminder" => Some(KnownAttachmentSubtype::TaskReminder),
+        "todo_reminder" => Some(KnownAttachmentSubtype::TodoReminder),
+        "deferred_tools_delta" => Some(KnownAttachmentSubtype::DeferredToolsDelta),
+        "plan_mode" => Some(KnownAttachmentSubtype::PlanMode),
+        "plan_mode_exit" => Some(KnownAttachmentSubtype::PlanModeExit),
+        "plan_mode_reentry" => Some(KnownAttachmentSubtype::PlanModeReentry),
+        "nested_memory" => Some(KnownAttachmentSubtype::NestedMemory),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KnownAttachmentSubtype {
+    HookSuccess,
+    HookPermissionDecision,
+    McpInstructionsDelta,
+    SkillListing,
+    EditedTextFile,
+    TaskReminder,
+    TodoReminder,
+    DeferredToolsDelta,
+    PlanMode,
+    PlanModeExit,
+    PlanModeReentry,
+    NestedMemory,
+}
+
+impl<'de> Deserialize<'de> for AttachmentBody {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Two-pass: capture the body as a raw Value, inspect `type`, dispatch
+        // into the matching subtype struct via `from_value`. An unmodeled
+        // subtype falls through to `AttachmentBody::Unknown` capturing both
+        // the subtype name and the full raw body. A missing or non-string
+        // `type` field is an error — same contract as JSONLRecord above.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let type_field = value
+            .get("type")
+            .ok_or_else(|| de::Error::missing_field("type"))?;
+        let subtype = type_field.as_str().ok_or_else(|| {
+            de::Error::invalid_type(
+                de::Unexpected::Other(&format!("non-string attachment type: {type_field}")),
+                &"a string-valued attachment `type` discriminator",
+            )
+        })?;
+
+        if let Some(kind) = known_attachment_subtype(subtype) {
+            // Strip `type` before dispatch so it does not leak into a
+            // subtype struct's `#[serde(flatten)] overflow`. Mirrors the
+            // strip-before-flatten guard in JSONLRecord's manual Deserialize.
+            let mut typed_value = value;
+            if let Some(map) = typed_value.as_object_mut() {
+                map.remove("type");
+            }
+            return match kind {
+                KnownAttachmentSubtype::HookSuccess => {
+                    serde_json::from_value::<HookSuccessBody>(typed_value)
+                        .map(AttachmentBody::HookSuccess)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::HookPermissionDecision => {
+                    serde_json::from_value::<HookPermissionDecisionBody>(typed_value)
+                        .map(AttachmentBody::HookPermissionDecision)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::McpInstructionsDelta => {
+                    serde_json::from_value::<McpInstructionsDeltaBody>(typed_value)
+                        .map(AttachmentBody::McpInstructionsDelta)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::SkillListing => {
+                    serde_json::from_value::<SkillListingBody>(typed_value)
+                        .map(AttachmentBody::SkillListing)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::EditedTextFile => {
+                    serde_json::from_value::<EditedTextFileBody>(typed_value)
+                        .map(AttachmentBody::EditedTextFile)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::TaskReminder => {
+                    serde_json::from_value::<TaskReminderBody>(typed_value)
+                        .map(AttachmentBody::TaskReminder)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::TodoReminder => {
+                    serde_json::from_value::<TodoReminderBody>(typed_value)
+                        .map(AttachmentBody::TodoReminder)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::DeferredToolsDelta => {
+                    serde_json::from_value::<DeferredToolsDeltaBody>(typed_value)
+                        .map(AttachmentBody::DeferredToolsDelta)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::PlanMode => {
+                    serde_json::from_value::<PlanModeBody>(typed_value)
+                        .map(AttachmentBody::PlanMode)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::PlanModeExit => {
+                    serde_json::from_value::<PlanModeExitBody>(typed_value)
+                        .map(AttachmentBody::PlanModeExit)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::PlanModeReentry => {
+                    serde_json::from_value::<PlanModeBody>(typed_value)
+                        .map(AttachmentBody::PlanModeReentry)
+                        .map_err(de::Error::custom)
+                }
+                KnownAttachmentSubtype::NestedMemory => {
+                    serde_json::from_value::<NestedMemoryBody>(typed_value)
+                        .map(AttachmentBody::NestedMemory)
+                        .map_err(de::Error::custom)
+                }
+            };
+        }
+
+        Ok(AttachmentBody::Unknown {
+            subtype: subtype.to_string(),
+            raw: value,
+        })
+    }
+}
+
+impl Serialize for AttachmentBody {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // For typed variants, build a JSON object from the inner struct and
+        // insert the `type` discriminator. For Unknown, serialize the raw
+        // Value directly — it already includes the original `type` field.
+        match self {
+            AttachmentBody::HookSuccess(b) => insert_type_and_serialize(b, "hook_success", serializer),
+            AttachmentBody::HookPermissionDecision(b) => {
+                insert_type_and_serialize(b, "hook_permission_decision", serializer)
+            }
+            AttachmentBody::McpInstructionsDelta(b) => {
+                insert_type_and_serialize(b, "mcp_instructions_delta", serializer)
+            }
+            AttachmentBody::SkillListing(b) => insert_type_and_serialize(b, "skill_listing", serializer),
+            AttachmentBody::EditedTextFile(b) => {
+                insert_type_and_serialize(b, "edited_text_file", serializer)
+            }
+            AttachmentBody::TaskReminder(b) => insert_type_and_serialize(b, "task_reminder", serializer),
+            AttachmentBody::TodoReminder(b) => insert_type_and_serialize(b, "todo_reminder", serializer),
+            AttachmentBody::DeferredToolsDelta(b) => {
+                insert_type_and_serialize(b, "deferred_tools_delta", serializer)
+            }
+            AttachmentBody::PlanMode(b) => insert_type_and_serialize(b, "plan_mode", serializer),
+            AttachmentBody::PlanModeExit(b) => insert_type_and_serialize(b, "plan_mode_exit", serializer),
+            AttachmentBody::PlanModeReentry(b) => {
+                insert_type_and_serialize(b, "plan_mode_reentry", serializer)
+            }
+            AttachmentBody::NestedMemory(b) => insert_type_and_serialize(b, "nested_memory", serializer),
+            AttachmentBody::Unknown { raw, .. } => raw.serialize(serializer),
+        }
+    }
+}
+
+/// `hook_success` body — populated for every hook execution that the daemon
+/// captures. Joinable to `tool_executions.tool_use_id` via `tool_use_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookSuccessBody {
+    pub hook_name: String,
+    #[serde(rename = "toolUseID")]
+    pub tool_use_id: String,
+    pub hook_event: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub stdout: Option<String>,
+    #[serde(default)]
+    pub stderr: Option<String>,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `hook_permission_decision` body — emitted for `PermissionRequest`-style
+/// hook events. `decision` is typically `"allow"` or `"deny"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookPermissionDecisionBody {
+    pub decision: String,
+    #[serde(rename = "toolUseID")]
+    pub tool_use_id: String,
+    pub hook_event: String,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `mcp_instructions_delta` body. Fields beyond the modeled set
+/// (`removedNames` observed in the corpus) ride in overflow for forensic
+/// recoverability without expanding the modeled schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInstructionsDeltaBody {
+    #[serde(default)]
+    pub added_names: Vec<String>,
+    #[serde(default)]
+    pub added_blocks: Vec<String>,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `skill_listing` body — newline-joined enumeration of the agent's available
+/// skills. Additional fields (`skillCount`, `isInitial`) ride in overflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillListingBody {
+    pub content: String,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `edited_text_file` body — captures the line-numbered snippet shown to the
+/// agent after a file edit operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditedTextFileBody {
+    pub filename: String,
+    pub snippet: String,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `task_reminder` body. `content` is `serde_json::Value` because the field
+/// is observed empty (`[]`) on most records but is shaped as a list of task
+/// objects when populated. Plan-table-driven typing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskReminderBody {
+    pub content: serde_json::Value,
+    pub item_count: i64,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `todo_reminder` body — same shape as `task_reminder`. Modeled as a
+/// distinct struct because future schema changes may differentiate them and
+/// rusqlite-row binding becomes simpler with concrete types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoReminderBody {
+    pub content: serde_json::Value,
+    pub item_count: i64,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `deferred_tools_delta` body. Like `mcp_instructions_delta`, additional
+/// fields observed in the corpus (`addedLines`, `removedNames`,
+/// `readdedNames`) ride in overflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredToolsDeltaBody {
+    #[serde(default)]
+    pub added_names: Vec<String>,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `plan_mode` body, also reused for `plan_mode_reentry` per plan §C1.1
+/// ("same shape as plan_mode"). Both `reminderType` and `isSubAgent` are
+/// optional because some corpus samples carry them and some do not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanModeBody {
+    pub plan_file_path: String,
+    #[serde(default)]
+    pub plan_exists: Option<bool>,
+    #[serde(default)]
+    pub reminder_type: Option<String>,
+    #[serde(default)]
+    pub is_sub_agent: Option<bool>,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `plan_mode_exit` body. Both fields are optional per the plan table; in
+/// the corpus survey they are typically present but the spec marks them so.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanModeExitBody {
+    #[serde(default)]
+    pub plan_file_path: Option<String>,
+    #[serde(default)]
+    pub plan_exists: Option<bool>,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// Inner content object inside a `nested_memory.content` payload.
+/// Captures the path/type/content triple plus any unmodeled fields
+/// (`contentDiffersFromDisk` was observed) into overflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NestedMemoryContent {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub content: String,
+    #[serde(flatten)]
+    pub overflow: HashMap<String, serde_json::Value>,
+}
+
+/// `nested_memory` body. Wraps `NestedMemoryContent` so the inner triple
+/// (path/type/content) is queryable directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NestedMemoryBody {
+    pub path: String,
+    pub content: NestedMemoryContent,
     #[serde(flatten)]
     pub overflow: HashMap<String, serde_json::Value>,
 }
@@ -775,14 +1235,15 @@ mod tests {
         }
     }
 
-    /// Test B-B-2: each of the six observed unknown discriminators from the
-    /// corpus survey (attachment, last-prompt, custom-title, permission-mode,
-    /// agent-name, ai-title) deserializes to JSONLRecord::Unknown rather than
-    /// failing. This is the corpus-survey-driven regression check.
+    /// Test B-B-2: the five session-metadata unknown discriminators from the
+    /// corpus survey (last-prompt, custom-title, permission-mode, agent-name,
+    /// ai-title) continue to deserialize to JSONLRecord::Unknown after C1.1.
+    /// `attachment` was the sixth member in the original B1.1 survey but is
+    /// now promoted to a typed variant via C1.1 — see
+    /// test_attachment_discriminator_no_longer_unknown above.
     #[test]
     fn test_unknown_variant_known_corpus_discriminators() {
         let cases: &[(&str, &str)] = &[
-            ("attachment", r#"{"type":"attachment","attachment":{"type":"hook_success"}}"#),
             ("last-prompt", r#"{"type":"last-prompt","lastPrompt":"hi","sessionId":"s"}"#),
             ("custom-title", r#"{"type":"custom-title","customTitle":"x","sessionId":"s"}"#),
             ("permission-mode", r#"{"type":"permission-mode","permissionMode":"plan","sessionId":"s"}"#),
@@ -865,6 +1326,507 @@ mod tests {
                 );
             }
             _ => panic!("Expected User variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // C1.1 — AttachmentRecord + AttachmentBody tests
+    //
+    // One test per modeled subtype (12 total) exercises real-corpus JSON
+    // bodies sampled from /tmp/c1.1-samples-<subtype>.json (kept inline so
+    // the regression net does not depend on any out-of-tree fixture). Plus:
+    // - Unknown subtype falls through to AttachmentBody::Unknown
+    // - Attachment Serialize round-trip
+    // - Missing required field on a modeled subtype falls through to Unknown
+    // - "attachment" as JSONLRecord discriminator dispatches to
+    //   JSONLRecord::Attachment, NOT JSONLRecord::Unknown (regression check
+    //   that the dispatch table now includes attachment).
+    // -----------------------------------------------------------------------
+
+    /// Helper: assert that a JSONL line parses to JSONLRecord::Attachment and
+    /// returns the body for further inspection.
+    fn parse_attachment(json: &str) -> AttachmentBody {
+        let record: JSONLRecord = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("attachment record should parse: {e}\nJSON: {json}"));
+        match record {
+            JSONLRecord::Attachment(r) => r.attachment,
+            other => panic!("expected JSONLRecord::Attachment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_hook_success() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-hs-001",
+            "timestamp": "2026-05-04T01:39:46.095Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "cwd": "/Users/david/Projects/cc-history-api",
+            "gitBranch": "main",
+            "slug": "curious-napping-koala",
+            "entrypoint": "cli",
+            "parentUuid": "parent-001",
+            "userType": "external",
+            "isSidechain": false,
+            "attachment": {
+                "type": "hook_success",
+                "hookName": "PostToolUse:Bash",
+                "toolUseID": "toolu_01abc",
+                "hookEvent": "PostToolUse",
+                "content": "",
+                "stdout": "{}\n",
+                "stderr": "",
+                "exitCode": 0,
+                "command": "python3 hook.py",
+                "durationMs": 27
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::HookSuccess(b) => {
+                assert_eq!(b.hook_name, "PostToolUse:Bash");
+                assert_eq!(b.tool_use_id, "toolu_01abc");
+                assert_eq!(b.hook_event, "PostToolUse");
+                assert_eq!(b.exit_code, Some(0));
+                assert_eq!(b.duration_ms, Some(27));
+                assert_eq!(b.command.as_deref(), Some("python3 hook.py"));
+            }
+            other => panic!("expected HookSuccess, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_hook_permission_decision() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-hpd-001",
+            "timestamp": "2026-05-04T01:39:51.066Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "cwd": "/Users/david/Projects/cc-history-api",
+            "gitBranch": "main",
+            "attachment": {
+                "type": "hook_permission_decision",
+                "decision": "allow",
+                "toolUseID": "toolu_01G58KeXWvV1cvo1BENqqX9b",
+                "hookEvent": "PermissionRequest"
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::HookPermissionDecision(b) => {
+                assert_eq!(b.decision, "allow");
+                assert_eq!(b.tool_use_id, "toolu_01G58KeXWvV1cvo1BENqqX9b");
+                assert_eq!(b.hook_event, "PermissionRequest");
+            }
+            other => panic!("expected HookPermissionDecision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_mcp_instructions_delta() {
+        // `removedNames` is observed in real corpus records — it lands in
+        // overflow, since the plan's modeled set is just (addedNames, addedBlocks).
+        let json = r###"{
+            "type": "attachment",
+            "uuid": "att-mid-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "mcp_instructions_delta",
+                "addedNames": ["claude-history"],
+                "addedBlocks": ["## claude-history\n..."],
+                "removedNames": []
+            }
+        }"###;
+        match parse_attachment(json) {
+            AttachmentBody::McpInstructionsDelta(b) => {
+                assert_eq!(b.added_names, vec!["claude-history".to_string()]);
+                assert_eq!(b.added_blocks.len(), 1);
+                assert!(
+                    b.overflow.contains_key("removedNames"),
+                    "removedNames must ride in overflow"
+                );
+            }
+            other => panic!("expected McpInstructionsDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_skill_listing() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-sl-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "skill_listing",
+                "content": "- update-config: ...",
+                "skillCount": 171,
+                "isInitial": true
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::SkillListing(b) => {
+                assert!(b.content.starts_with("- update-config"));
+                assert!(b.overflow.contains_key("skillCount"));
+                assert!(b.overflow.contains_key("isInitial"));
+            }
+            other => panic!("expected SkillListing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_edited_text_file() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-etf-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "edited_text_file",
+                "filename": "/path/to/file.ts",
+                "snippet": "1\tline one\n2\tline two\n"
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::EditedTextFile(b) => {
+                assert_eq!(b.filename, "/path/to/file.ts");
+                assert!(b.snippet.contains("line one"));
+            }
+            other => panic!("expected EditedTextFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_task_reminder() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-tr-001",
+            "timestamp": "2026-05-04T01:39:46.095Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "task_reminder",
+                "content": [],
+                "itemCount": 0
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::TaskReminder(b) => {
+                assert!(b.content.is_array());
+                assert_eq!(b.item_count, 0);
+            }
+            other => panic!("expected TaskReminder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_todo_reminder() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-todor-001",
+            "timestamp": "2026-04-24T23:31:24.984Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.119",
+            "attachment": {
+                "type": "todo_reminder",
+                "content": [],
+                "itemCount": 0
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::TodoReminder(b) => {
+                assert!(b.content.is_array());
+                assert_eq!(b.item_count, 0);
+            }
+            other => panic!("expected TodoReminder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_deferred_tools_delta() {
+        // Real corpus records carry `addedLines`, `removedNames`,
+        // `readdedNames` in addition to the modeled `addedNames` — they
+        // ride in overflow.
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-dtd-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "deferred_tools_delta",
+                "addedNames": ["CronCreate", "CronDelete"],
+                "addedLines": ["CronCreate", "CronDelete"],
+                "removedNames": [],
+                "readdedNames": []
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::DeferredToolsDelta(b) => {
+                assert_eq!(b.added_names.len(), 2);
+                assert!(b.overflow.contains_key("addedLines"));
+                assert!(b.overflow.contains_key("removedNames"));
+                assert!(b.overflow.contains_key("readdedNames"));
+            }
+            other => panic!("expected DeferredToolsDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_plan_mode() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-pm-001",
+            "timestamp": "2026-04-25T03:42:34.373Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.119",
+            "attachment": {
+                "type": "plan_mode",
+                "reminderType": "full",
+                "isSubAgent": false,
+                "planFilePath": "/Users/david/.claude/plans/x.md",
+                "planExists": false
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::PlanMode(b) => {
+                assert_eq!(b.plan_file_path, "/Users/david/.claude/plans/x.md");
+                assert_eq!(b.plan_exists, Some(false));
+                assert_eq!(b.reminder_type.as_deref(), Some("full"));
+                assert_eq!(b.is_sub_agent, Some(false));
+            }
+            other => panic!("expected PlanMode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_plan_mode_exit() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-pme-001",
+            "timestamp": "2026-05-07T21:43:31.576Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "plan_mode_exit",
+                "planFilePath": "/Users/david/.claude/plans/y.md",
+                "planExists": true
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::PlanModeExit(b) => {
+                assert_eq!(b.plan_file_path.as_deref(), Some("/Users/david/.claude/plans/y.md"));
+                assert_eq!(b.plan_exists, Some(true));
+            }
+            other => panic!("expected PlanModeExit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_plan_mode_reentry() {
+        // plan_mode_reentry shares the PlanModeBody shape per plan §C1.1.
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-pmr-001",
+            "timestamp": "2026-05-08T11:09:20.870Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "plan_mode_reentry",
+                "planFilePath": "/Users/david/.claude/plans/z.md"
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::PlanModeReentry(b) => {
+                assert_eq!(b.plan_file_path, "/Users/david/.claude/plans/z.md");
+                assert_eq!(b.plan_exists, None);
+            }
+            other => panic!("expected PlanModeReentry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_attachment_nested_memory() {
+        let json = r##"{
+            "type": "attachment",
+            "uuid": "att-nm-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "nested_memory",
+                "path": "/tmp/CLAUDE.md",
+                "content": {
+                    "path": "/tmp/CLAUDE.md",
+                    "type": "Project",
+                    "content": "# memo\n",
+                    "contentDiffersFromDisk": false
+                }
+            }
+        }"##;
+        match parse_attachment(json) {
+            AttachmentBody::NestedMemory(b) => {
+                assert_eq!(b.path, "/tmp/CLAUDE.md");
+                assert_eq!(b.content.path, "/tmp/CLAUDE.md");
+                assert_eq!(b.content.kind, "Project");
+                assert_eq!(b.content.content, "# memo\n");
+                assert!(b.content.overflow.contains_key("contentDiffersFromDisk"));
+            }
+            other => panic!("expected NestedMemory, got {other:?}"),
+        }
+    }
+
+    /// An unknown inner subtype must fall through to AttachmentBody::Unknown
+    /// rather than failing the parent record's deserialization. This is the
+    /// Path-A pattern applied at the inner discriminator level.
+    #[test]
+    fn test_attachment_unknown_subtype_falls_through() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-unk-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "date_change",
+                "previous": "2026-05-03",
+                "current": "2026-05-04"
+            }
+        }"#;
+        match parse_attachment(json) {
+            AttachmentBody::Unknown { subtype, raw } => {
+                assert_eq!(subtype, "date_change");
+                assert_eq!(raw.get("previous").and_then(|v| v.as_str()), Some("2026-05-03"));
+                assert_eq!(raw.get("current").and_then(|v| v.as_str()), Some("2026-05-04"));
+                assert_eq!(
+                    raw.get("type").and_then(|v| v.as_str()),
+                    Some("date_change"),
+                    "raw must retain inner discriminator"
+                );
+            }
+            other => panic!("expected AttachmentBody::Unknown, got {other:?}"),
+        }
+    }
+
+    /// Serialize round-trip: an Attachment that parses then re-serializes
+    /// must re-parse to the same variant. We don't byte-compare the JSON
+    /// (HashMap iteration is non-deterministic) but the structural identity
+    /// is what downstream consumers rely on.
+    #[test]
+    fn test_attachment_serialize_roundtrip() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-rt-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-rt",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "hook_success",
+                "hookName": "Stop",
+                "toolUseID": "tu-rt",
+                "hookEvent": "Stop",
+                "exitCode": 0,
+                "durationMs": 5
+            }
+        }"#;
+        let parsed: JSONLRecord = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        let reparsed: JSONLRecord = serde_json::from_str(&serialized).unwrap();
+        match reparsed {
+            JSONLRecord::Attachment(r) => {
+                assert_eq!(r.uuid, "att-rt-001");
+                assert_eq!(r.session_id, "sess-rt");
+                match r.attachment {
+                    AttachmentBody::HookSuccess(b) => {
+                        assert_eq!(b.hook_name, "Stop");
+                        assert_eq!(b.exit_code, Some(0));
+                    }
+                    other => panic!("expected HookSuccess after roundtrip, got {other:?}"),
+                }
+            }
+            other => panic!("expected Attachment after roundtrip, got {other:?}"),
+        }
+        // Outer discriminator must survive the roundtrip.
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["type"], "attachment");
+        assert_eq!(value["attachment"]["type"], "hook_success");
+    }
+
+    /// A modeled subtype with a missing required field (e.g. `hook_success`
+    /// without `hookName`) should fall through to AttachmentBody::Unknown
+    /// rather than failing the whole parent record. The plan §C1.1 framing:
+    /// "getting any single subtype's struct shape wrong on first encounter
+    /// will silently dump the record into the unknown-subtype catch-all" —
+    /// this test locks in that behavior.
+    #[test]
+    fn test_attachment_modeled_subtype_missing_field_falls_through() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-bad-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-bad",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "hook_success",
+                "toolUseID": "tu-bad",
+                "hookEvent": "Stop"
+            }
+        }"#;
+        let result: Result<JSONLRecord, _> = serde_json::from_str(json);
+        // The behavior we want for C1.1: a missing required field on a
+        // modeled subtype currently surfaces as a parse error from the typed
+        // dispatch (because hook_name has no #[serde(default)]). The Path-A
+        // fall-through happens at the *outer* level for unknown discriminators.
+        // For modeled-but-malformed inner bodies the contract is "parse error
+        // bubbles up" — distinct from the inner-discriminator catch-all.
+        // This test documents that asymmetry so future review knows the
+        // failure mode is intentional.
+        assert!(
+            result.is_err(),
+            "modeled subtype missing required field should error, not silently fall through"
+        );
+    }
+
+    /// Regression check: the JSONLRecord-level dispatch for "attachment"
+    /// must now route to JSONLRecord::Attachment, NOT JSONLRecord::Unknown.
+    /// Pre-C1.1, B1.1's test_unknown_variant_known_corpus_discriminators
+    /// asserted "attachment" hit Unknown. C1.1 promotes it; that prior
+    /// behavior must change here.
+    #[test]
+    fn test_attachment_discriminator_no_longer_unknown() {
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-promo-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-promo",
+            "version": "2.1.126",
+            "attachment": {"type": "hook_success", "hookName": "h", "toolUseID": "tu", "hookEvent": "Stop"}
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(record, JSONLRecord::Attachment(_)),
+            "attachment discriminator must now route to Attachment, not Unknown"
+        );
+    }
+
+    /// Regression check: non-attachment unknown discriminators (e.g.
+    /// `last-prompt`) must still fall through to JSONLRecord::Unknown after
+    /// C1.1, since C1.1 only promoted `attachment`.
+    #[test]
+    fn test_non_attachment_unknown_still_falls_through_post_c11() {
+        let cases: &[&str] = &["last-prompt", "custom-title", "permission-mode", "agent-name", "ai-title"];
+        for type_name in cases {
+            let json = format!(r#"{{"type":"{type_name}","sessionId":"s","foo":"bar"}}"#);
+            let record: JSONLRecord = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{type_name} should parse: {e}"));
+            match record {
+                JSONLRecord::Unknown { type_name: tn, .. } => assert_eq!(tn, *type_name),
+                other => panic!("expected Unknown for {type_name}, got {other:?}"),
+            }
         }
     }
 

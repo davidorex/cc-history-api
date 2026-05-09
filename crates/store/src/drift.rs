@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use claude_history_core::record::JSONLRecord;
+use claude_history_core::record::{AttachmentBody, JSONLRecord};
 use rusqlite::Transaction;
 
 /// Maximum length for sample_value stored in schema_drift_log.
@@ -209,6 +209,118 @@ pub fn log_record_overflow(
 
         JSONLRecord::FileHistorySnapshot(r) => {
             log_overflow("unknown", "file-history-snapshot", &r.overflow, tx)
+        }
+
+        // Attachment arm (C1.1). Three drift signals can fire on a single
+        // attachment record:
+        //
+        //   1. Envelope-level overflow (record.overflow) — fields observed
+        //      on the outer attachment record envelope that are not yet
+        //      enumerated in AttachmentRecord (e.g. `agentId` was observed
+        //      on some deferred_tools_delta records). Logged with
+        //      record_type = "attachment".
+        //
+        //   2. Inner-body overflow (each subtype struct's #[serde(flatten)]
+        //      overflow HashMap). Logged with record_type =
+        //      "attachment.<subtype>" so per-subtype drift signals are
+        //      distinguishable from envelope drift.
+        //
+        //   3. Inner-discriminator catch-all: if the body parsed as
+        //      AttachmentBody::Unknown, log to record_type_drift_log with
+        //      record_type = "attachment.<subtype>" so unmodeled subtypes
+        //      surface via the drift CLI/REST. This is the inner-level
+        //      Path-A pattern described in plan §C1.1.
+        //
+        // The version string is taken from the envelope when present,
+        // falling back to "unknown" so log_overflow's UNIQUE constraint
+        // still partitions sensibly. record_type_drift_log permits NULL
+        // version, so the inner-discriminator path passes Option<&str>
+        // directly.
+        JSONLRecord::Attachment(r) => {
+            let version = r.version.as_deref().unwrap_or("unknown");
+            let mut total = 0;
+            // 1. envelope overflow
+            total += log_overflow(version, "attachment", &r.overflow, tx)?;
+
+            // 2. + 3. dispatch by inner body
+            match &r.attachment {
+                AttachmentBody::HookSuccess(b) => {
+                    total += log_overflow(version, "attachment.hook_success", &b.overflow, tx)?;
+                }
+                AttachmentBody::HookPermissionDecision(b) => {
+                    total += log_overflow(
+                        version,
+                        "attachment.hook_permission_decision",
+                        &b.overflow,
+                        tx,
+                    )?;
+                }
+                AttachmentBody::McpInstructionsDelta(b) => {
+                    total += log_overflow(
+                        version,
+                        "attachment.mcp_instructions_delta",
+                        &b.overflow,
+                        tx,
+                    )?;
+                }
+                AttachmentBody::SkillListing(b) => {
+                    total += log_overflow(version, "attachment.skill_listing", &b.overflow, tx)?;
+                }
+                AttachmentBody::EditedTextFile(b) => {
+                    total +=
+                        log_overflow(version, "attachment.edited_text_file", &b.overflow, tx)?;
+                }
+                AttachmentBody::TaskReminder(b) => {
+                    total += log_overflow(version, "attachment.task_reminder", &b.overflow, tx)?;
+                }
+                AttachmentBody::TodoReminder(b) => {
+                    total += log_overflow(version, "attachment.todo_reminder", &b.overflow, tx)?;
+                }
+                AttachmentBody::DeferredToolsDelta(b) => {
+                    total += log_overflow(
+                        version,
+                        "attachment.deferred_tools_delta",
+                        &b.overflow,
+                        tx,
+                    )?;
+                }
+                AttachmentBody::PlanMode(b) => {
+                    total += log_overflow(version, "attachment.plan_mode", &b.overflow, tx)?;
+                }
+                AttachmentBody::PlanModeExit(b) => {
+                    total += log_overflow(version, "attachment.plan_mode_exit", &b.overflow, tx)?;
+                }
+                AttachmentBody::PlanModeReentry(b) => {
+                    total +=
+                        log_overflow(version, "attachment.plan_mode_reentry", &b.overflow, tx)?;
+                }
+                AttachmentBody::NestedMemory(b) => {
+                    total += log_overflow(version, "attachment.nested_memory", &b.overflow, tx)?;
+                }
+                AttachmentBody::Unknown { subtype, raw } => {
+                    // Inner-discriminator catch-all. Mirrors the truncation
+                    // policy used in `decompose_unknown` so the two drift
+                    // tables produce comparable forensic samples.
+                    let type_name = format!("attachment.{subtype}");
+                    let raw_json = raw.to_string();
+                    let sample_value = if raw_json.len() > MAX_SAMPLE_VALUE_LEN {
+                        let mut cut = MAX_SAMPLE_VALUE_LEN;
+                        while !raw_json.is_char_boundary(cut) && cut > 0 {
+                            cut -= 1;
+                        }
+                        format!("{}...", &raw_json[..cut])
+                    } else {
+                        raw_json
+                    };
+                    total += log_record_type_drift(
+                        &type_name,
+                        r.version.as_deref(),
+                        &sample_value,
+                        tx,
+                    )?;
+                }
+            }
+            Ok(total)
         }
 
         // The Unknown variant has no per-field overflow HashMap — its entire
@@ -899,6 +1011,190 @@ mod tests {
             )
             .unwrap();
         assert!(version.is_none(), "no version field => NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // C1.1 — log_record_overflow Attachment arm tests
+    // -----------------------------------------------------------------------
+
+    /// A modeled-subtype Attachment with extra fields produces drift rows
+    /// scoped to "attachment.<subtype>" — proving that the Attachment arm
+    /// dispatches into per-subtype drift logging rather than dumping every
+    /// field under the bare "attachment" record_type.
+    #[test]
+    fn test_log_record_overflow_attachment_modeled_subtype_overflow() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // mcp_instructions_delta carries `removedNames` in real corpus
+        // records — it lands in McpInstructionsDeltaBody.overflow per the
+        // C1.1 modeled set.
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-mid-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "mcp_instructions_delta",
+                "addedNames": ["x"],
+                "addedBlocks": ["block"],
+                "removedNames": []
+            }
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+        let total = log_record_overflow(&record, &tx).unwrap();
+        tx.commit().unwrap();
+        assert!(total >= 1, "expected at least one drift row for the inner overflow");
+
+        // Verify the record_type is the qualified subtype, not bare "attachment".
+        let row_type: String = conn
+            .query_row(
+                "SELECT record_type FROM schema_drift_log WHERE field_name = 'removedNames'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_type, "attachment.mcp_instructions_delta");
+    }
+
+    /// An Attachment with an unmodeled inner subtype writes a row to
+    /// record_type_drift_log with type_name = "attachment.<subtype>". This
+    /// is the C1.1 inner-discriminator catch-all and is the structural
+    /// foundation that lets C1.2 promote new subtypes data-driven.
+    #[test]
+    fn test_log_record_overflow_attachment_unknown_subtype() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // `date_change` is one of the ~10 unmodeled subtypes from the
+        // corpus survey. The plan §C1.1 marks it as out-of-scope by volume.
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-dc-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-c11",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "date_change",
+                "previous": "2026-05-03",
+                "current": "2026-05-04"
+            }
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+
+        // Pre-condition: the body is Unknown.
+        match &record {
+            JSONLRecord::Attachment(r) => match &r.attachment {
+                AttachmentBody::Unknown { subtype, .. } => {
+                    assert_eq!(subtype, "date_change");
+                }
+                other => panic!("expected AttachmentBody::Unknown, got {other:?}"),
+            },
+            _ => panic!("expected Attachment variant"),
+        }
+
+        log_record_overflow(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        let (type_name, version): (String, Option<String>) = conn
+            .query_row(
+                "SELECT type_name, version FROM record_type_drift_log
+                 WHERE type_name LIKE 'attachment.%'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(type_name, "attachment.date_change");
+        assert_eq!(version.as_deref(), Some("2.1.126"));
+    }
+
+    /// decompose_record dispatches a JSONLRecord::Attachment to
+    /// decompose_attachment. For modeled subtypes this is currently a
+    /// no-op (C1.1 stub; C1.2 lands the table writes). For unknown inner
+    /// subtypes it writes to record_type_drift_log with the qualified
+    /// type_name. This test exercises both paths via the dispatcher to
+    /// catch any wiring regressions.
+    #[test]
+    fn test_decompose_record_attachment_modeled_is_stub_no_op_on_typed_tables() {
+        use crate::decompose::decompose_record;
+
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-stub-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-stub",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "hook_success",
+                "hookName": "Stop",
+                "toolUseID": "tu-stub",
+                "hookEvent": "Stop",
+                "exitCode": 0,
+                "durationMs": 5
+            }
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+        let result = decompose_record(&record, "sess-stub", &tx).unwrap();
+        tx.commit().unwrap();
+
+        // C1.1 contract: modeled-subtype dispatch does not yet write to
+        // attachments or hook_executions. C1.2 will change this.
+        let attachments_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            attachments_count, 0,
+            "C1.1 stub must NOT write to attachments — that is C1.2's job"
+        );
+        let hook_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hook_executions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            hook_count, 0,
+            "C1.1 stub must NOT write to hook_executions — that is C1.2's job"
+        );
+
+        // No drift-log row either, because the modeled body has no overflow
+        // and is not Unknown. The result struct should reflect this.
+        assert_eq!(result.overflow_fields, 0);
+    }
+
+    #[test]
+    fn test_decompose_record_attachment_unknown_subtype_writes_drift_row() {
+        use crate::decompose::decompose_record;
+
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-unk-stub-001",
+            "timestamp": "2026-05-04T01:00:00.000Z",
+            "sessionId": "sess-unk-stub",
+            "version": "2.1.126",
+            "attachment": {
+                "type": "auto_mode",
+                "active": true
+            }
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+        let result = decompose_record(&record, "sess-unk-stub", &tx).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(result.overflow_fields, 1, "one drift-log row should land");
+
+        let type_name: String = conn
+            .query_row(
+                "SELECT type_name FROM record_type_drift_log WHERE type_name LIKE 'attachment.%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(type_name, "attachment.auto_mode");
     }
 
     /// Test: the sample_value is truncated for very large unknown payloads
