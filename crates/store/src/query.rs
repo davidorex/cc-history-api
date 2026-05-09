@@ -490,6 +490,16 @@ pub fn list_sessions(
 /// [CLI-03] Supports filtering by session_id, message_type, model, tool name,
 /// and date range. The tool filter uses an EXISTS subquery against tool_executions.
 /// Results are ordered by timestamp descending.
+///
+/// `has_plan` (C2.5.1, addressing C2.5-Audit row #1): when `Some(true)`,
+/// narrows results to messages with `plan_content IS NOT NULL`. When
+/// `Some(false)`, narrows to messages with `plan_content IS NULL`. `None`
+/// leaves the filter off entirely (legacy behavior preserved). The
+/// `Some(true)` branch can be served by the partial index
+/// `idx_messages_plan_content_present` (added by migration 010); the
+/// `Some(false)` branch is intended primarily for surface symmetry and
+/// will not use that partial index.
+#[allow(clippy::too_many_arguments)]
 pub fn query_messages(
     conn: &Connection,
     session_id: Option<&str>,
@@ -498,6 +508,7 @@ pub fn query_messages(
     tool: Option<&str>,
     after: Option<&str>,
     before: Option<&str>,
+    has_plan: Option<bool>,
     limit: usize,
 ) -> Result<Vec<MessageResult>, rusqlite::Error> {
     let mut conditions = Vec::new();
@@ -529,6 +540,19 @@ pub fn query_messages(
     if let Some(before) = before {
         conditions.push(format!("m.timestamp <= ?{}", param_values.len() + 1));
         param_values.push(Box::new(before.to_string()));
+    }
+    match has_plan {
+        Some(true) => {
+            // Constant predicate; no parameter binding required. The
+            // partial index idx_messages_plan_content_present(session_id)
+            // WHERE plan_content IS NOT NULL is available to the planner
+            // when this branch is the sole or leading filter.
+            conditions.push("m.plan_content IS NOT NULL".to_string());
+        }
+        Some(false) => {
+            conditions.push("m.plan_content IS NULL".to_string());
+        }
+        None => {}
     }
 
     let where_clause = if conditions.is_empty() {
@@ -2631,6 +2655,55 @@ mod tests {
 
         let none_filter = list_sessions(&conn, None, None, None, None, 50).unwrap();
         assert_eq!(none_filter.len(), 2);
+    }
+
+    #[test]
+    fn test_query_messages_has_plan_filter() {
+        // C2.5.1, addressing C2.5-Audit row #1 (impl-defect):
+        // exercise the has_plan parameter on query_messages — Some(true)
+        // returns only plan-bearing messages, Some(false) returns only
+        // non-plan messages, None preserves pre-C2.5.1 unfiltered
+        // behavior.
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        seed_message_with_plan(
+            &conn,
+            "m-with-plan",
+            "s-1",
+            "2026-05-01T00:00:00Z",
+            Some("# Plan body"),
+        );
+        seed_message_with_plan(
+            &conn,
+            "m-no-plan",
+            "s-1",
+            "2026-05-02T00:00:00Z",
+            None,
+        );
+
+        let with_plan =
+            query_messages(&conn, None, None, None, None, None, None, Some(true), 50)
+                .unwrap();
+        assert_eq!(with_plan.len(), 1, "Some(true) returns only plan-bearing rows");
+        assert_eq!(with_plan[0].uuid, "m-with-plan");
+
+        let without_plan =
+            query_messages(&conn, None, None, None, None, None, None, Some(false), 50)
+                .unwrap();
+        assert_eq!(
+            without_plan.len(),
+            1,
+            "Some(false) returns only non-plan rows"
+        );
+        assert_eq!(without_plan[0].uuid, "m-no-plan");
+
+        let unfiltered =
+            query_messages(&conn, None, None, None, None, None, None, None, 50).unwrap();
+        assert_eq!(
+            unfiltered.len(),
+            2,
+            "None preserves pre-C2.5.1 unfiltered behavior"
+        );
     }
 
     #[test]

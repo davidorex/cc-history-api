@@ -42,6 +42,12 @@ pub struct MessageQuery {
     pub after: Option<String>,
     /// Show messages before this date (YYYY-MM-DD or ISO8601).
     pub before: Option<String>,
+    /// When true, narrow to messages with plan_content present
+    /// (migration 010); false narrows to messages without plan_content;
+    /// absent leaves the filter off. Added by C2.5.1 for surface
+    /// consistency with the MCP `query_messages.has_plan` parameter.
+    #[serde(default)]
+    pub has_plan: Option<bool>,
     /// Maximum results to return. Defaults to 100.
     pub limit: Option<usize>,
 }
@@ -73,6 +79,7 @@ pub async fn query(
                 body.tool.as_deref(),
                 body.after.as_deref(),
                 body.before.as_deref(),
+                body.has_plan,
                 limit,
             )
         })

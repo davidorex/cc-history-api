@@ -50,6 +50,13 @@ pub struct QueryMessagesParams {
     pub after: Option<String>,
     /// Show messages before this date
     pub before: Option<String>,
+    /// When true, narrows to messages with plan_content present (plan-mode
+    /// markdown bodies, migration 010). When false, narrows to messages with
+    /// no plan_content. Omit to leave the filter off. Mirrors the
+    /// `has_plan` filter on `list_sessions` (C2.4) at the message-row
+    /// granularity. Added by C2.5.1.
+    #[serde(default)]
+    pub has_plan: Option<bool>,
     /// Maximum results
     pub limit: Option<usize>,
 }
@@ -266,7 +273,7 @@ impl McpService {
         json_result(&results)
     }
 
-    #[tool(description = "Query messages with filters for session, type, model, tool, and date range.")]
+    #[tool(description = "Query messages with filters for session, type, model, tool, date range, and plan-content presence. has_plan=true narrows to plan-bearing messages (migration 010 plan_content column); has_plan=false narrows to messages without plan_content; omit for no filter.")]
     async fn query_messages(
         &self,
         Parameters(params): Parameters<QueryMessagesParams>,
@@ -278,6 +285,7 @@ impl McpService {
         let tool = params.tool;
         let after = params.after;
         let before = params.before;
+        let has_plan = params.has_plan;
         let results = self
             .state
             .conn
@@ -290,6 +298,7 @@ impl McpService {
                     tool.as_deref(),
                     after.as_deref(),
                     before.as_deref(),
+                    has_plan,
                     limit,
                 )
             })

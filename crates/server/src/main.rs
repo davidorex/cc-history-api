@@ -1302,6 +1302,11 @@ async fn run_query(
                         tool.as_deref(),
                         after.as_deref(),
                         before.as_deref(),
+                        // C2.5.1: CLI `claude-history query` does not yet
+                        // expose --has-plan; pass None to preserve the
+                        // pre-C2.5.1 caller behavior. A CLI surface
+                        // addition would be a separate change.
+                        None,
                         limit,
                     )
                 })
