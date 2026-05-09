@@ -1850,86 +1850,79 @@ async fn run_attachments_show(mode: ConnectionMode, uuid: String, json: bool) ->
     }
 }
 
-/// Dispatcher for the `plans` subcommand (C2.4).
+/// Dispatcher for the `plans` subcommand (C2.4 / C2.6).
 ///
-/// Routes to list / show. Both go direct-to-DB regardless of daemon
-/// availability: the daemon's `/v1/plans` REST endpoints are C2.6
-/// territory and not yet present, so daemon-routing would fail with
-/// `404` here. `ensure_direct_conn` opens a fresh `tokio_rusqlite`
-/// connection from `CLAUDE_HISTORY_DB_PATH` / `--db-path` / default
-/// when the resolved mode was `Daemon`, and reuses the existing direct
-/// connection when it is already `Direct`.
+/// Routes through the daemon HTTP API at `/v1/plans` and
+/// `/v1/plans/{session_id}` when a daemon is reachable, falling back
+/// to a direct DB connection otherwise. The daemon-routing wrappers
+/// landed in C2.6 alongside the REST endpoints; before C2.6 the
+/// dispatcher always opened a fresh direct connection because
+/// daemon-routed plan calls would have 404'd.
 async fn run_plans(mode: ConnectionMode, action: PlansAction) -> ExitCode {
-    let conn = match ensure_direct_conn(mode).await {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("Error: {}", msg);
-            return ExitCode::FAILURE;
-        }
-    };
-
     match action {
         PlansAction::List {
             project,
             since,
             limit,
             json,
-        } => run_plans_list(conn, project, since, limit, json).await,
+        } => run_plans_list(mode, project, since, limit, json).await,
         PlansAction::Show { session_id, json } => {
-            run_plans_show(conn, session_id, json).await
-        }
-    }
-}
-
-/// Coerce a `ConnectionMode` into a direct `tokio_rusqlite::Connection`.
-///
-/// When `Daemon` is active, opens a fresh DB connection at the resolved
-/// db_path. When already `Direct`, reuses the existing connection. The
-/// extra connection in daemon mode runs alongside the daemon's own
-/// connection — SQLite handles concurrent readers cleanly under WAL
-/// mode (the schema's default).
-async fn ensure_direct_conn(
-    mode: ConnectionMode,
-) -> Result<tokio_rusqlite::Connection, String> {
-    match mode {
-        ConnectionMode::Direct { conn, .. } => Ok(conn),
-        ConnectionMode::Daemon(_) => {
-            let db_path = resolve_db_path(None).ok_or_else(|| {
-                "Could not determine database path for plans subcommand.".to_string()
-            })?;
-            tokio_rusqlite::Connection::open(&db_path)
-                .await
-                .map_err(|e| format!("Failed to open DB at {}: {}", db_path.display(), e))
+            run_plans_show(mode, session_id, json).await
         }
     }
 }
 
 /// `claude-history plans list` — list plan-bearing messages with filters.
+///
+/// Routes through the daemon's `/v1/plans` endpoint when available,
+/// otherwise opens a direct DB connection and calls
+/// `claude_history_store::query::plans_list`. Output rendering is
+/// identical regardless of which path produced the rows.
 async fn run_plans_list(
-    conn: tokio_rusqlite::Connection,
+    mode: ConnectionMode,
     project: Option<String>,
     since: Option<String>,
     limit: usize,
     json: bool,
 ) -> ExitCode {
-    let project_owned = project.clone();
-    let since_owned = since.clone();
-    let results = match conn
-        .call(move |conn| {
-            claude_history_store::query::plans_list(
-                conn,
-                project_owned.as_deref(),
-                since_owned.as_deref(),
-                limit,
-            )
-            .map_err(tokio_rusqlite::Error::from)
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Plans list query failed: {}", e);
-            return ExitCode::FAILURE;
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing plans list through daemon"
+            );
+            match client
+                .plans_list(project.as_deref(), since.as_deref(), Some(limit))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon plans list query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let project_owned = project.clone();
+            let since_owned = since.clone();
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::plans_list(
+                        conn,
+                        project_owned.as_deref(),
+                        since_owned.as_deref(),
+                        limit,
+                    )
+                    .map_err(tokio_rusqlite::Error::from)
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Plans list query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
         }
     };
 
@@ -1945,23 +1938,47 @@ async fn run_plans_list(
 }
 
 /// `claude-history plans show <session-id>` — full plan markdown for a session.
+///
+/// Routes through the daemon's `/v1/plans/{session_id}` endpoint when
+/// available, otherwise opens a direct DB connection. The daemon
+/// returns 404 when there are no plan-bearing messages; the
+/// `daemon_client::plan_show` wrapper folds 404 into `Ok(None)` so the
+/// CLI can render the same "no plans" message regardless of mode.
 async fn run_plans_show(
-    conn: tokio_rusqlite::Connection,
+    mode: ConnectionMode,
     session_id: String,
     json: bool,
 ) -> ExitCode {
-    let session_id_owned = session_id.clone();
-    let results = match conn
-        .call(move |conn| {
-            claude_history_store::query::plan_show(conn, &session_id_owned)
-                .map_err(tokio_rusqlite::Error::from)
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: Plan show query failed: {}", e);
-            return ExitCode::FAILURE;
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing plans show through daemon"
+            );
+            match client.plan_show(&session_id).await {
+                Ok(Some(r)) => r,
+                Ok(None) => Vec::new(),
+                Err(e) => {
+                    eprintln!("Error: Daemon plan show query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let session_id_owned = session_id.clone();
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::plan_show(conn, &session_id_owned)
+                        .map_err(tokio_rusqlite::Error::from)
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Plan show query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
         }
     };
 

@@ -32,8 +32,9 @@ use crate::api::health::HealthResponse;
 use claude_history_store::artifact_queries::{FileEntry, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{
-    AttachmentRow, HookExecutionRow, MessageResult, ModelStats, RecordTypeDriftEntry,
-    SessionSummary, TokenStats, ToolStats, VersionDriftGroup, VersionHistoryEntry,
+    AttachmentRow, HookExecutionRow, MessageResult, ModelStats, PlanFullRow, PlanRow,
+    RecordTypeDriftEntry, SessionSummary, TokenStats, ToolStats, VersionDriftGroup,
+    VersionHistoryEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -594,6 +595,83 @@ impl DaemonClient {
             Err(DaemonError::Api { status: 404, .. }) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Plans endpoint methods (C2.6)
+    // -------------------------------------------------------------------
+
+    /// GET /v1/plans — list plan-bearing messages with optional filters.
+    ///
+    /// Mirrors the daemon's `PlansListParams` shape (project / since /
+    /// limit). Returns the preview-projection rows; the full markdown
+    /// body is fetched via [`plan_show`](Self::plan_show).
+    pub async fn plans_list(
+        &self,
+        project: Option<&str>,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<PlanRow>, DaemonError> {
+        let mut params = Vec::new();
+        if let Some(p) = project {
+            params.push(format!("project={}", urlencoded(p)));
+        }
+        if let Some(s) = since {
+            params.push(format!("since={}", urlencoded(s)));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        let path = if params.is_empty() {
+            "/v1/plans".to_string()
+        } else {
+            format!("/v1/plans?{}", params.join("&"))
+        };
+        self.get(&path).await
+    }
+
+    /// GET /v1/plans/{session_id} — fetch full plan markdown bodies for
+    /// a session.
+    ///
+    /// Returns `Ok(None)` when the daemon responds 404 (no
+    /// plan-bearing messages for the session). Other errors propagate
+    /// through `DaemonError`. The 404-as-None mapping mirrors
+    /// [`attachment_show`](Self::attachment_show).
+    pub async fn plan_show(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Vec<PlanFullRow>>, DaemonError> {
+        let path = format!("/v1/plans/{}", urlencoded(session_id));
+        match self.get::<Vec<PlanFullRow>>(&path).await {
+            Ok(rows) => Ok(Some(rows)),
+            Err(DaemonError::Api { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// GET /v1/plans/search?q=... — FTS5 search restricted to
+    /// `block_type = 'plan_content'` rows.
+    ///
+    /// Returns `SearchResult`s with `block_type = "plan_content"` and
+    /// `source = SearchResultSource::Message`. Use this to surface
+    /// matches from plan markdown specifically; the general `/v1/search`
+    /// endpoint unions message-content + attachment-text matches but
+    /// does not isolate plan-content the way this does.
+    pub async fn plans_search(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<SearchResult>, DaemonError> {
+        let mut params = vec![format!("q={}", urlencoded(query))];
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        if let Some(o) = offset {
+            params.push(format!("offset={}", o));
+        }
+        let path = format!("/v1/plans/search?{}", params.join("&"));
+        self.get(&path).await
     }
 
     /// GET /v1/hook-executions — list hook execution rows with optional filters.

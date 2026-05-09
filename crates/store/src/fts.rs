@@ -388,6 +388,73 @@ pub fn search_messages_and_attachments(
     Ok(all.into_iter().skip(offset).take(limit).collect())
 }
 
+/// Search plan-content text using FTS5 full-text matching, restricted to
+/// the synthetic `block_type = 'plan_content'` rows in `message_content`
+/// (migration 011 / C2.3).
+///
+/// `fts_message_content` is shared between regular message blocks and
+/// the synthetic plan-content projection rows. This helper narrows the
+/// match set to the plan-content projection by joining
+/// `fts_message_content` to `message_content` and constraining
+/// `mc.block_type = 'plan_content'`. The resulting `SearchResult` rows
+/// carry `source = SearchResultSource::Message` and `block_type =
+/// "plan_content"` so existing CLI/REST consumers that key on
+/// `block_type` see the discriminator without new branches.
+///
+/// The query is sanitized by wrapping in double quotes and escaping
+/// internal quotes by doubling — same pattern as `search_messages` and
+/// `search_attachment_text_content`. Results are ordered by BM25
+/// ascending (lower / more-negative = better match).
+///
+/// Invoked by the REST `/v1/plans/search` handler (C2.6). Exists as a
+/// dedicated function rather than a flag on `search_messages` so the
+/// discriminating predicate stays out of the hot general-search SQL
+/// path.
+pub fn search_plans(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<SearchResult>, rusqlite::Error> {
+    let safe_query = format!("\"{}\"", query.replace('"', "\"\""));
+
+    let mut stmt = conn.prepare(
+        "SELECT
+            mc.message_uuid,
+            m.session_id,
+            m.type,
+            m.timestamp,
+            mc.block_type,
+            snippet(fts_message_content, 0, '>>>', '<<<', '...', 30),
+            bm25(fts_message_content)
+         FROM fts_message_content
+         JOIN message_content mc ON mc.id = fts_message_content.rowid
+         JOIN messages m ON m.uuid = mc.message_uuid
+         WHERE fts_message_content MATCH ?1
+           AND mc.block_type = 'plan_content'
+         ORDER BY bm25(fts_message_content)
+         LIMIT ?2 OFFSET ?3",
+    )?;
+
+    let results = stmt.query_map(
+        rusqlite::params![safe_query, limit as i64, offset as i64],
+        |row| {
+            Ok(SearchResult {
+                message_uuid: row.get(0)?,
+                session_id: row.get(1)?,
+                message_type: row.get(2)?,
+                timestamp: row.get(3)?,
+                block_type: row.get(4)?,
+                snippet: row.get(5)?,
+                rank: row.get(6)?,
+                source: SearchResultSource::Message,
+            })
+        },
+    )?;
+
+    results.collect()
+}
+
 /// Rebuild the FTS5 index for file_operations content.
 ///
 /// External-content FTS5 tables require explicit rebuild after content table
@@ -935,5 +1002,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0, "empty-body attachments must not produce FTS rows");
+    }
+
+    /// `search_plans` must return matches restricted to the synthetic
+    /// `block_type = 'plan_content'` rows from migration 011, ignoring
+    /// regular message-content rows that share the same FTS index even
+    /// when both contain the search term.
+    #[test]
+    fn test_search_plans_restricts_to_plan_content_block_type() {
+        let conn = setup_db();
+        insert_test_session(&conn, "sess-plans-search");
+        insert_test_message(&conn, "msg-plan-1", "sess-plans-search", "2026-02-20T08:00:00Z");
+        insert_test_message(&conn, "msg-text-1", "sess-plans-search", "2026-02-20T08:01:00Z");
+
+        // Synthetic plan_content row (block_index = -1 per C2.3 convention).
+        // Token "Quokka" appears here and should be a hit.
+        conn.execute(
+            "INSERT INTO message_content
+                (message_uuid, block_index, block_type, text_content)
+             VALUES (?1, -1, 'plan_content', ?2)",
+            rusqlite::params!["msg-plan-1", "plan body mentions Quokka extensively"],
+        )
+        .unwrap();
+
+        // Regular text block — also contains "Quokka" but should NOT
+        // appear in search_plans results because block_type is not
+        // 'plan_content'. This is the discriminating assertion.
+        conn.execute(
+            "INSERT INTO message_content
+                (message_uuid, block_index, block_type, text_content)
+             VALUES (?1, 0, 'text', ?2)",
+            rusqlite::params!["msg-text-1", "regular text mentions Quokka too"],
+        )
+        .unwrap();
+
+        rebuild_fts_index(&conn).unwrap();
+
+        let results = search_plans(&conn, "Quokka", 10, 0).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "exactly one match — the plan_content row, not the regular text row"
+        );
+        assert_eq!(results[0].message_uuid, "msg-plan-1");
+        assert_eq!(results[0].block_type, "plan_content");
+        assert_eq!(results[0].source, SearchResultSource::Message);
+
+        // Sanity: search_messages (un-restricted) returns BOTH rows.
+        let all = search_messages(&conn, "Quokka", 10, 0).unwrap();
+        assert_eq!(all.len(), 2, "un-restricted search returns both rows");
+    }
+
+    /// `search_plans` must return an empty vec when the query matches
+    /// no plan_content rows even though it matches regular content.
+    #[test]
+    fn test_search_plans_empty_when_only_regular_matches() {
+        let conn = setup_db();
+        insert_test_session(&conn, "sess-plans-empty");
+        insert_test_message(&conn, "msg-only-text", "sess-plans-empty", "2026-02-20T09:00:00Z");
+        conn.execute(
+            "INSERT INTO message_content
+                (message_uuid, block_index, block_type, text_content)
+             VALUES (?1, 0, 'text', ?2)",
+            rusqlite::params!["msg-only-text", "only a regular text mentions Pangolin"],
+        )
+        .unwrap();
+        rebuild_fts_index(&conn).unwrap();
+
+        let results = search_plans(&conn, "Pangolin", 10, 0).unwrap();
+        assert!(
+            results.is_empty(),
+            "no plan_content rows means search_plans returns empty"
+        );
     }
 }

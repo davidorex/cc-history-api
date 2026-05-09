@@ -2,7 +2,7 @@
 //!
 //! Exposes endpoint handlers organized by resource (health, sessions, messages,
 //! search, analytics, export, schema, projects, sql, files, git, artifacts,
-//! events) and a `build_router` function that assembles all 36 routes into an
+//! events) and a `build_router` function that assembles all 39 routes into an
 //! axum Router with shared application state and TraceLayer middleware for
 //! request/response logging.
 
@@ -16,6 +16,7 @@ pub mod git;
 pub mod health;
 pub mod hook_executions;
 pub mod messages;
+pub mod plans;
 pub mod projects;
 pub mod schema;
 pub mod search;
@@ -31,7 +32,7 @@ use crate::state::SharedState;
 
 /// Build the axum Router with all API routes and shared state.
 ///
-/// Registers 36 endpoints across 16 resource groups with TraceLayer
+/// Registers 39 endpoints across 17 resource groups with TraceLayer
 /// middleware for structured request/response logging:
 ///
 /// **Health:**
@@ -96,6 +97,11 @@ use crate::state::SharedState;
 ///
 /// **Hook executions:** [C1.4]
 ///   - GET /v1/hook-executions
+///
+/// **Plans:** [C2.6]
+///   - GET /v1/plans
+///   - GET /v1/plans/search
+///   - GET /v1/plans/{session_id}
 ///
 /// **Events:**
 ///   - GET /v1/events (SSE stream)
@@ -166,6 +172,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/attachments/{uuid}", get(attachments::show))
         // Hook executions [C1.4]
         .route("/v1/hook-executions", get(hook_executions::list))
+        // Plans [C2.6]
+        // IMPORTANT: /v1/plans/search MUST be registered BEFORE
+        // /v1/plans/{session_id} to avoid the path parameter capturing
+        // "search" as a session_id value (same precedent as the files
+        // and git resource groups above).
+        .route("/v1/plans", get(plans::list))
+        .route("/v1/plans/search", get(plans::search))
+        .route("/v1/plans/{session_id}", get(plans::show))
         // Events (SSE)
         .route("/v1/events", get(events::events_handler))
         // Middleware
