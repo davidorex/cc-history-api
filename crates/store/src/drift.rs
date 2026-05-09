@@ -30,12 +30,22 @@ const MAX_SAMPLE_VALUE_LEN: usize = 500;
 /// - Inserts via INSERT ... ON CONFLICT DO UPDATE, which increments
 ///   `occurrence_count` and refreshes `last_seen_at` on re-observation
 ///
+/// `version` is `Option<&str>` so callers whose record envelope carries no
+/// version (per C1.2.1 audit row #15: `AttachmentRecord.version = None` must
+/// not collide with any string sentinel like `"unknown"`) can bind SQL NULL
+/// directly. The schema_drift_log column allows NULL per migration 001;
+/// SQLite's UNIQUE(field_name, record_type, version) treats NULL as distinct
+/// from any concrete string. Callers that historically passed `"unknown"`
+/// (QueueOperation/Summary/FileHistorySnapshot — kept for backward
+/// compatibility) continue to wrap with `Some("unknown")`; only the
+/// AttachmentRecord-with-None path uses None now.
+///
 /// Returns the number of fields observed (both new inserts and re-observations).
 /// This count includes updates to existing rows, since ON CONFLICT DO UPDATE
 /// returns 1 for both inserts and updates. The return value is used for
 /// SchemaDrift SSE event emission and debug logging.
 pub fn log_overflow(
-    version: &str,
+    version: Option<&str>,
     record_type: &str,
     overflow: &HashMap<String, serde_json::Value>,
     tx: &Transaction,
@@ -54,10 +64,10 @@ pub fn log_overflow(
             sample
         };
 
-        let source_context = format!(
-            "overflow capture from {} record v{}",
-            record_type, version
-        );
+        let source_context = match version {
+            Some(v) => format!("overflow capture from {} record v{}", record_type, v),
+            None => format!("overflow capture from {} record (no version)", record_type),
+        };
 
         let changed = tx.execute(
             "INSERT INTO schema_drift_log
@@ -73,7 +83,7 @@ pub fn log_overflow(
             tracing::debug!(
                 field_name = field_name,
                 record_type = record_type,
-                version = version,
+                version = ?version,
                 "Schema drift field observed"
             );
             new_entries += changed;
@@ -84,7 +94,7 @@ pub fn log_overflow(
         tracing::info!(
             count = new_entries,
             record_type = record_type,
-            version = version,
+            version = ?version,
             "Observed {} schema drift field(s)",
             new_entries
         );
@@ -168,21 +178,21 @@ pub fn log_record_overflow(
 ) -> Result<usize, rusqlite::Error> {
     match record {
         JSONLRecord::User(r) => {
-            log_overflow(&r.base.version, "user", &r.overflow, tx)
+            log_overflow(Some(&r.base.version), "user", &r.overflow, tx)
         }
 
         JSONLRecord::Assistant(r) => {
             let mut total = 0;
-            total += log_overflow(&r.base.version, "assistant", &r.overflow, tx)?;
+            total += log_overflow(Some(&r.base.version), "assistant", &r.overflow, tx)?;
             total += log_overflow(
-                &r.base.version,
+                Some(&r.base.version),
                 "assistant.message",
                 &r.message.overflow,
                 tx,
             )?;
             if let Some(ref usage) = r.message.usage {
                 total += log_overflow(
-                    &r.base.version,
+                    Some(&r.base.version),
                     "assistant.message.usage",
                     &usage.overflow,
                     tx,
@@ -192,23 +202,31 @@ pub fn log_record_overflow(
         }
 
         JSONLRecord::Progress(r) => {
-            log_overflow(&r.base.version, "progress", &r.overflow, tx)
+            log_overflow(Some(&r.base.version), "progress", &r.overflow, tx)
         }
 
         JSONLRecord::System(r) => {
-            log_overflow(&r.base.version, "system", &r.overflow, tx)
+            log_overflow(Some(&r.base.version), "system", &r.overflow, tx)
         }
 
+        // QueueOperation / Summary / FileHistorySnapshot have no `version`
+        // field on their record envelopes (verified via crates/core/src/record.rs).
+        // The C1.2.1 NULL-partition fix targets `AttachmentRecord.version = None`
+        // specifically; these three pre-existing callers retain `Some("unknown")`
+        // so the schema_drift_log rows they have produced historically remain
+        // queryable under the same partition key. Migrating them to None is a
+        // separate decision out of scope for C1.2.1 — it would require a
+        // backfill of the existing rows.
         JSONLRecord::QueueOperation(r) => {
-            log_overflow("unknown", "queue-operation", &r.overflow, tx)
+            log_overflow(Some("unknown"), "queue-operation", &r.overflow, tx)
         }
 
         JSONLRecord::Summary(r) => {
-            log_overflow("unknown", "summary", &r.overflow, tx)
+            log_overflow(Some("unknown"), "summary", &r.overflow, tx)
         }
 
         JSONLRecord::FileHistorySnapshot(r) => {
-            log_overflow("unknown", "file-history-snapshot", &r.overflow, tx)
+            log_overflow(Some("unknown"), "file-history-snapshot", &r.overflow, tx)
         }
 
         // Attachment arm (C1.1). Three drift signals can fire on a single
@@ -231,13 +249,15 @@ pub fn log_record_overflow(
         //      surface via the drift CLI/REST. This is the inner-level
         //      Path-A pattern described in plan §C1.1.
         //
-        // The version string is taken from the envelope when present,
-        // falling back to "unknown" so log_overflow's UNIQUE constraint
-        // still partitions sensibly. record_type_drift_log permits NULL
-        // version, so the inner-discriminator path passes Option<&str>
-        // directly.
+        // The version string is taken from the envelope when present and
+        // bound as SQL NULL when absent (per C1.2.1 audit row #15 fix:
+        // `AttachmentRecord.version = None` must not collide with the
+        // string-literal `"unknown"` partition used by `decompose_unknown`
+        // for the JSONLRecord::Unknown variant). Both schema_drift_log and
+        // record_type_drift_log permit NULL version; SQLite's UNIQUE
+        // constraint treats NULL as distinct from any string sentinel.
         JSONLRecord::Attachment(r) => {
-            let version = r.version.as_deref().unwrap_or("unknown");
+            let version = r.version.as_deref();
             let mut total = 0;
             // 1. envelope overflow
             total += log_overflow(version, "attachment", &r.overflow, tx)?;
@@ -397,7 +417,7 @@ mod tests {
             serde_json::json!(42),
         );
 
-        let logged = log_overflow("2.1.49", "user", &overflow, &tx).unwrap();
+        let logged = log_overflow(Some("2.1.49"), "user", &overflow, &tx).unwrap();
         tx.commit().unwrap();
 
         assert_eq!(logged, 2, "Should log 2 new entries");
@@ -453,7 +473,7 @@ mod tests {
         // First call
         {
             let tx = conn.unchecked_transaction().unwrap();
-            let logged = log_overflow("2.1.49", "assistant", &overflow, &tx).unwrap();
+            let logged = log_overflow(Some("2.1.49"), "assistant", &overflow, &tx).unwrap();
             tx.commit().unwrap();
             assert_eq!(logged, 1);
         }
@@ -470,7 +490,7 @@ mod tests {
         // ON CONFLICT DO UPDATE returns 1 (update counts as a change)
         {
             let tx = conn.unchecked_transaction().unwrap();
-            let logged = log_overflow("2.1.49", "assistant", &overflow, &tx).unwrap();
+            let logged = log_overflow(Some("2.1.49"), "assistant", &overflow, &tx).unwrap();
             tx.commit().unwrap();
             assert_eq!(logged, 1, "ON CONFLICT DO UPDATE returns 1 for the updated row");
         }
@@ -521,7 +541,7 @@ mod tests {
         // Insert twice
         for _ in 0..2 {
             let tx = conn.unchecked_transaction().unwrap();
-            log_overflow("2.1.50", "user", &overflow, &tx).unwrap();
+            log_overflow(Some("2.1.50"), "user", &overflow, &tx).unwrap();
             tx.commit().unwrap();
         }
 
@@ -571,7 +591,7 @@ mod tests {
             serde_json::Value::String(long_value.clone()),
         );
 
-        let logged = log_overflow("2.1.49", "progress", &overflow, &tx).unwrap();
+        let logged = log_overflow(Some("2.1.49"), "progress", &overflow, &tx).unwrap();
         tx.commit().unwrap();
         assert_eq!(logged, 1);
 
@@ -602,7 +622,7 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
 
         let overflow: HashMap<String, serde_json::Value> = HashMap::new();
-        let logged = log_overflow("2.1.49", "system", &overflow, &tx).unwrap();
+        let logged = log_overflow(Some("2.1.49"), "system", &overflow, &tx).unwrap();
         tx.commit().unwrap();
 
         assert_eq!(logged, 0);

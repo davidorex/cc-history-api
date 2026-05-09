@@ -448,7 +448,7 @@ fn decompose_user(
     // 6. Log overflow for drift detection (uses ORIGINAL overflow including
     // promoted keys — drift tracks what Claude Code sends)
     result.overflow_fields += drift::log_overflow(
-        &r.base.version,
+        Some(&r.base.version),
         "user",
         &r.overflow,
         tx,
@@ -496,7 +496,7 @@ fn decompose_assistant(
 
         // Log usage overflow (server_tool_use, iterations, inference_geo, etc.)
         result.overflow_fields += drift::log_overflow(
-            &r.base.version,
+            Some(&r.base.version),
             "assistant.message.usage",
             &usage.overflow,
             tx,
@@ -541,13 +541,13 @@ fn decompose_assistant(
 
     // 7. Log overflow from both AssistantRecord and AssistantMessage levels
     result.overflow_fields += drift::log_overflow(
-        &r.base.version,
+        Some(&r.base.version),
         "assistant",
         &r.overflow,
         tx,
     )?;
     result.overflow_fields += drift::log_overflow(
-        &r.base.version,
+        Some(&r.base.version),
         "assistant.message",
         &r.message.overflow,
         tx,
@@ -578,7 +578,7 @@ fn decompose_progress(
 
     // 3. Log overflow
     result.overflow_fields += drift::log_overflow(
-        &r.base.version,
+        Some(&r.base.version),
         "progress",
         &r.overflow,
         tx,
@@ -610,7 +610,7 @@ fn decompose_queue_operation(
     // Log overflow — version is not available on queue-operation records,
     // so we use "unknown" as the version context
     result.overflow_fields += drift::log_overflow(
-        "unknown",
+        Some("unknown"),
         "queue-operation",
         &r.overflow,
         tx,
@@ -666,7 +666,7 @@ fn decompose_system(
 
     // 5. Log overflow for drift detection
     result.overflow_fields += drift::log_overflow(
-        &r.base.version,
+        Some(&r.base.version),
         "system",
         &r.overflow,
         tx,
@@ -695,7 +695,7 @@ fn decompose_summary(
 
     // Log overflow — no version available on lightweight records
     result.overflow_fields += drift::log_overflow(
-        "unknown",
+        Some("unknown"),
         "summary",
         &r.overflow,
         tx,
@@ -725,7 +725,7 @@ fn decompose_file_history_snapshot(
 
     // Log overflow if present
     result.overflow_fields += drift::log_overflow(
-        "unknown",
+        Some("unknown"),
         "file-history-snapshot",
         &r.overflow,
         tx,
@@ -842,7 +842,12 @@ fn upsert_session_from_attachment(
 /// Insert one row into `attachments` from an `AttachmentRecord`.
 ///
 /// `inner_type` is the AttachmentBody subtype discriminator (e.g.
-/// `"hook_success"`, `"plan_mode"`, `"attachment.<subtype>"` for unmodeled).
+/// `"hook_success"`, `"plan_mode"`, or the bare unmodeled subtype name like
+/// `"date_change"` — per the C1.2.1 audit row #37 resolution, the
+/// `"attachment.<subtype>"` qualified prefix is reserved for
+/// `record_type_drift_log.type_name` only and is not duplicated here so a
+/// future promotion of an unmodeled subtype into the modeled set produces
+/// rows under one consistent `inner_type` value).
 /// `body_json` is the serialized inner body — for modeled subtypes it is the
 /// per-subtype struct (which already excludes the `type` discriminator); for
 /// the Unknown variant it is the raw Value preserving the original on-disk
@@ -896,8 +901,14 @@ fn insert_hook_success_row(
     body: &claude_history_core::record::HookSuccessBody,
     tx: &Transaction,
 ) -> Result<usize, rusqlite::Error> {
+    // INSERT OR IGNORE per the C1.2.1 idempotency contract. The natural
+    // primary key is the migration-008 UNIQUE(attachment_uuid, hook_event,
+    // tool_use_id) composite. Re-decomposing the same hook_success record
+    // routes through OR-IGNORE rather than accumulating duplicate rows in
+    // hook_executions — matching the decompose_user / decompose_assistant
+    // INSERT OR IGNORE precedent on UUID-PK tables.
     let changed = tx.execute(
-        "INSERT INTO hook_executions
+        "INSERT OR IGNORE INTO hook_executions
          (attachment_uuid, hook_name, hook_event, tool_use_id, exit_code,
           duration_ms, stdout, stderr, command, decision)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
@@ -924,8 +935,12 @@ fn insert_hook_permission_decision_row(
     body: &claude_history_core::record::HookPermissionDecisionBody,
     tx: &Transaction,
 ) -> Result<usize, rusqlite::Error> {
+    // INSERT OR IGNORE per the C1.2.1 idempotency contract. See
+    // insert_hook_success_row for the rationale; the same UNIQUE
+    // (attachment_uuid, hook_event, tool_use_id) composite governs both
+    // hook subtypes since they share the hook_executions table.
     let changed = tx.execute(
-        "INSERT INTO hook_executions
+        "INSERT OR IGNORE INTO hook_executions
          (attachment_uuid, hook_name, hook_event, tool_use_id, exit_code,
           duration_ms, stdout, stderr, command, decision)
          VALUES (?1, NULL, ?2, ?3, NULL, NULL, NULL, NULL, NULL, ?4)",
@@ -999,11 +1014,16 @@ fn decompose_attachment(
     // Step 1: ensure the sessions row exists for the FK.
     result.rows_inserted += upsert_session_from_attachment(record, tx)?;
 
-    // Drift-version string for the per-subtype log_overflow calls. Falls
-    // back to "unknown" when AttachmentRecord.version is None — matches the
-    // policy in drift.rs::log_record_overflow's Attachment arm and keeps the
-    // schema_drift_log UNIQUE constraint partitioned sensibly.
-    let drift_version = record.version.as_deref().unwrap_or("unknown");
+    // C1.2.1 fix (audit row #15): the drift-version partition for an
+    // AttachmentRecord uses Option<&str> bound directly to SQL NULL when the
+    // envelope's `version` field is absent, rather than the literal string
+    // `"unknown"`. The previous fallback collided with the partition key
+    // produced by `decompose_unknown` for the JSONLRecord::Unknown variant
+    // (which itself uses the literal `"unknown"` for missing versions on
+    // `last-prompt`/`custom-title`/etc). NULL is partition-distinct from any
+    // string sentinel; both `schema_drift_log.version` and
+    // `record_type_drift_log.version` allow NULL per migrations 001 and 007.
+    let drift_version: Option<&str> = record.version.as_deref();
 
     // Step 5a: envelope overflow drift logging (signal #1 from drift.rs's
     // Attachment-arm comment block). Runs unconditionally so envelope
@@ -1137,7 +1157,25 @@ fn decompose_attachment(
             // the raw body so forensic recovery is possible without
             // re-parsing the JSONL, AND log to record_type_drift_log so the
             // schema-drift surfaces (CLI/REST) report the unmodeled subtype.
-            let inner_type = format!("attachment.{subtype}");
+            //
+            // C1.2.1 fix (audit row #37): the two destinations carry the
+            // discriminator under different namespaces and that distinction
+            // is now respected:
+            //   - `attachments.inner_type` is set to the literal `subtype`
+            //     verbatim (e.g. `"date_change"`). Modeled subtypes write
+            //     the bare subtype name there too, so a future promotion
+            //     of an unmodeled subtype into the modeled set produces
+            //     rows under one consistent `inner_type` value rather than
+            //     two parallel namespaces (`"date_change"` vs
+            //     `"attachment.date_change"`).
+            //   - `record_type_drift_log.type_name` retains the qualified
+            //     `"attachment.<subtype>"` prefix so cross-record drift
+            //     tracking distinguishes attachment-inner-discriminator
+            //     drift from outer `JSONLRecord::Unknown` drift (e.g. a
+            //     `"last-prompt"` outer-Unknown record vs an attachment
+            //     subtype string that happens to be `"last-prompt"`).
+            let inner_type = subtype.clone();
+            let drift_type_name = format!("attachment.{subtype}");
             let raw_json = serde_json::to_string(raw)?;
             result.rows_inserted +=
                 insert_attachment_row(record, &inner_type, Some(&raw_json), tx)?;
@@ -1154,7 +1192,7 @@ fn decompose_attachment(
                 raw_json
             };
             result.overflow_fields += drift::log_record_type_drift(
-                &inner_type,
+                &drift_type_name,
                 record.version.as_deref(),
                 &sample_value,
                 tx,
@@ -2637,7 +2675,12 @@ mod tests {
         decompose_record(&record, "fallback-sess", &tx).unwrap();
         tx.commit().unwrap();
 
-        // attachments row populated with raw body_json
+        // attachments row populated with raw body_json. Per C1.2.1 fix
+        // (audit row #37) the inner_type is the bare subtype (no
+        // "attachment." prefix); the prefix is retained only on
+        // record_type_drift_log.type_name to keep that table's cross-record
+        // drift discriminator namespaced from outer JSONLRecord::Unknown
+        // discriminators.
         let (inner_type, body_json): (String, Option<String>) = conn
             .query_row(
                 "SELECT inner_type, body_json FROM attachments WHERE uuid = 'att-unknown-001'",
@@ -2645,13 +2688,14 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(inner_type, "attachment.fictional_unmodeled_subtype_xyz");
+        assert_eq!(inner_type, "fictional_unmodeled_subtype_xyz");
         assert!(body_json.is_some());
         let parsed: serde_json::Value = serde_json::from_str(&body_json.unwrap()).unwrap();
         assert_eq!(parsed["fooField"], "bar");
         assert_eq!(parsed["extraValue"], 42);
 
-        // record_type_drift_log row written
+        // record_type_drift_log row written under the qualified "attachment.<subtype>"
+        // type_name — the two columns are intentionally distinct.
         let drift_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM record_type_drift_log
@@ -2661,6 +2705,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(drift_count, 1);
+
+        // Confirm the unprefixed name does NOT appear in record_type_drift_log
+        // (the two columns serve distinct purposes).
+        let drift_count_unprefixed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM record_type_drift_log
+                 WHERE type_name = 'fictional_unmodeled_subtype_xyz'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(drift_count_unprefixed, 0);
     }
 
     // -----------------------------------------------------------------------
@@ -2761,5 +2817,287 @@ mod tests {
             )
             .unwrap();
         assert_eq!(drift_count, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // C1.2.1 — idempotency: re-decomposing the same attachment record
+    // produces the same DB state. Mirrors the test_decompose_idempotency
+    // precedent for User records and exercises the
+    // INSERT-OR-IGNORE-on-hook_executions contract that audit row #2
+    // surfaced as missing in C1.2. Three subtype shapes are exercised:
+    //   - hook_success (writes attachments + hook_executions)
+    //   - hook_permission_decision (also writes hook_executions, with
+    //     NULL tool_use_id potentially)
+    //   - Unknown (writes attachments + record_type_drift_log; the
+    //     drift-log occurrence_count is expected to increment on
+    //     re-observation per the log_record_type_drift contract)
+    // -----------------------------------------------------------------------
+
+    /// Re-decompose a hook_success attachment. Asserts attachments stays at
+    /// 1 row (INSERT OR IGNORE on uuid), hook_executions stays at 1 row
+    /// (INSERT OR IGNORE on the migration-008
+    /// UNIQUE(attachment_uuid, hook_event, tool_use_id) composite). Exercises
+    /// the per-table idempotency contract that audit row #2 identified as
+    /// missing prior to C1.2.1.
+    #[test]
+    fn test_decompose_attachment_idempotency_hook_success() {
+        let conn = setup_db();
+
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-idem-hs-001",
+            "sessionId": "sess-idem-hs",
+            "timestamp": "2026-05-09T10:00:00.000Z",
+            "version": "2.1.126",
+            "cwd": "/tmp/test",
+            "gitBranch": "main",
+            "slug": "test",
+            "isSidechain": false,
+            "userType": "external",
+            "attachment": {
+                "type": "hook_success",
+                "hookName": "PostToolUse",
+                "toolUseID": "toolu_idem_001",
+                "hookEvent": "PostToolUse",
+                "exitCode": 0,
+                "durationMs": 7
+            }
+        }"#;
+        let record: claude_history_core::record::JSONLRecord =
+            serde_json::from_str(json).unwrap();
+
+        // First decompose
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            decompose_record(&record, "fallback-sess", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+        let attachments_after_first: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachments", [], |r| r.get(0))
+            .unwrap();
+        let hook_after_first: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hook_executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attachments_after_first, 1);
+        assert_eq!(hook_after_first, 1);
+
+        // Second decompose — must not duplicate either row.
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            decompose_record(&record, "fallback-sess", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+        let attachments_after_second: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachments", [], |r| r.get(0))
+            .unwrap();
+        let hook_after_second: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hook_executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            attachments_after_second, 1,
+            "attachments must stay at 1 (INSERT OR IGNORE on uuid)"
+        );
+        assert_eq!(
+            hook_after_second, 1,
+            "hook_executions must stay at 1 (INSERT OR IGNORE on UNIQUE composite)"
+        );
+    }
+
+    /// Re-decompose a hook_permission_decision attachment. Same shape as
+    /// the hook_success idempotency test but exercises the second hook
+    /// helper (insert_hook_permission_decision_row) which also gained
+    /// INSERT OR IGNORE in C1.2.1.
+    #[test]
+    fn test_decompose_attachment_idempotency_hook_permission_decision() {
+        let conn = setup_db();
+
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-idem-hpd-001",
+            "sessionId": "sess-idem-hpd",
+            "timestamp": "2026-05-09T10:00:00.000Z",
+            "version": "2.1.126",
+            "cwd": "/tmp/test",
+            "gitBranch": "main",
+            "slug": "test",
+            "isSidechain": false,
+            "userType": "external",
+            "attachment": {
+                "type": "hook_permission_decision",
+                "decision": "allow",
+                "toolUseID": "toolu_idem_hpd_001",
+                "hookEvent": "PreToolUse"
+            }
+        }"#;
+        let record: claude_history_core::record::JSONLRecord =
+            serde_json::from_str(json).unwrap();
+
+        for _ in 0..2 {
+            let tx = conn.unchecked_transaction().unwrap();
+            decompose_record(&record, "fallback-sess", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        let attachments_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachments", [], |r| r.get(0))
+            .unwrap();
+        let hook_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hook_executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attachments_count, 1);
+        assert_eq!(hook_count, 1);
+    }
+
+    /// Re-decompose an Unknown-subtype attachment. Asserts attachments
+    /// stays at 1 row, record_type_drift_log stays at 1 row but its
+    /// occurrence_count increments to 2 — this matches
+    /// log_record_type_drift's UPDATE-on-conflict semantics, consistent
+    /// with the decompose_unknown precedent at decompose.rs around the
+    /// log_record_type_drift call site.
+    #[test]
+    fn test_decompose_attachment_idempotency_unknown_subtype() {
+        let conn = setup_db();
+
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-idem-unk-001",
+            "sessionId": "sess-idem-unk",
+            "timestamp": "2026-05-09T10:00:00.000Z",
+            "version": "2.1.126",
+            "cwd": "/tmp/test",
+            "gitBranch": "main",
+            "slug": "test",
+            "isSidechain": false,
+            "userType": "external",
+            "attachment": {
+                "type": "fictional_idem_subtype_zzz",
+                "fooField": "bar"
+            }
+        }"#;
+        let record: claude_history_core::record::JSONLRecord =
+            serde_json::from_str(json).unwrap();
+
+        for _ in 0..2 {
+            let tx = conn.unchecked_transaction().unwrap();
+            decompose_record(&record, "fallback-sess", &tx).unwrap();
+            tx.commit().unwrap();
+        }
+
+        // attachments stays singular
+        let attachments_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attachments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attachments_count, 1);
+        // record_type_drift_log stays singular for this (type_name, version)
+        let drift_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM record_type_drift_log
+                 WHERE type_name = 'attachment.fictional_idem_subtype_zzz'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(drift_count, 1);
+        // occurrence_count incremented to 2 on the second observation
+        let occ: i64 = conn
+            .query_row(
+                "SELECT occurrence_count FROM record_type_drift_log
+                 WHERE type_name = 'attachment.fictional_idem_subtype_zzz'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(occ, 2);
+
+        // attachments.inner_type is the bare subtype (C1.2.1 audit row #37
+        // resolution); record_type_drift_log keeps the qualified
+        // "attachment.<subtype>" namespace.
+        let inner_type: String = conn
+            .query_row(
+                "SELECT inner_type FROM attachments WHERE uuid = 'att-idem-unk-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(inner_type, "fictional_idem_subtype_zzz");
+    }
+
+    // -----------------------------------------------------------------------
+    // C1.2.1 — NULL version partition (audit row #15). Asserts that an
+    // AttachmentRecord with no `version` field on its envelope produces
+    // schema_drift_log + record_type_drift_log rows whose `version` column
+    // is SQL NULL, not the literal string `"unknown"`. This protects the
+    // partition key from colliding with `decompose_unknown`'s own
+    // `"unknown"` fallback for `JSONLRecord::Unknown` records.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_attachment_null_version_partition() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // No `version` field on the envelope; an envelope-level overflow
+        // (`agentId`) provides a schema_drift_log row to inspect, and an
+        // unmodeled inner subtype provides a record_type_drift_log row.
+        let json = r#"{
+            "type": "attachment",
+            "uuid": "att-nullver-001",
+            "sessionId": "sess-nullver",
+            "timestamp": "2026-05-09T10:00:00.000Z",
+            "cwd": "/tmp/test",
+            "gitBranch": "main",
+            "slug": "test",
+            "isSidechain": false,
+            "userType": "external",
+            "agentId": "subagent_nullver",
+            "attachment": {
+                "type": "fictional_nullver_subtype",
+                "value": 1
+            }
+        }"#;
+        let record: claude_history_core::record::JSONLRecord =
+            serde_json::from_str(json).unwrap();
+        decompose_record(&record, "fallback-sess", &tx).unwrap();
+        tx.commit().unwrap();
+
+        // schema_drift_log: envelope agentId row's version is NULL.
+        let sd_version: Option<String> = conn
+            .query_row(
+                "SELECT version FROM schema_drift_log
+                 WHERE field_name = 'agentId' AND record_type = 'attachment'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sd_version.is_none(),
+            "AttachmentRecord with no version must bind NULL on schema_drift_log.version, not the literal 'unknown'"
+        );
+
+        // record_type_drift_log: unmodeled inner subtype row's version is NULL.
+        let rd_version: Option<String> = conn
+            .query_row(
+                "SELECT version FROM record_type_drift_log
+                 WHERE type_name = 'attachment.fictional_nullver_subtype'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            rd_version.is_none(),
+            "AttachmentRecord with no version must bind NULL on record_type_drift_log.version, not the literal 'unknown'"
+        );
+
+        // Neither table has a row with the literal version='unknown' for
+        // this attachment-derived data — that partition string is reserved
+        // for decompose_unknown's JSONLRecord::Unknown fallback.
+        let collision_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_drift_log
+                 WHERE record_type = 'attachment' AND version = 'unknown'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(collision_count, 0);
     }
 }

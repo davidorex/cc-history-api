@@ -67,6 +67,16 @@ CREATE INDEX IF NOT EXISTS idx_attachments_inner_type
 CREATE INDEX IF NOT EXISTS idx_attachments_timestamp
     ON attachments(timestamp);
 
+-- C1.2.1 idempotency contract: the (attachment_uuid, hook_event, tool_use_id)
+-- composite is the natural primary key for a hook_executions row, since a
+-- single attachment record produces exactly one hook_executions row and
+-- (hook_event, tool_use_id) is the join shape the table is structured around.
+-- Re-decomposing the same attachment record (e.g. via B1.2 bytewise
+-- re-ingestion) routes the new INSERT to OR-IGNORE on this UNIQUE rather than
+-- accumulating duplicate rows. SQLite treats NULLs as distinct in UNIQUE
+-- constraints (each NULL is unique against another NULL), which is the
+-- intended behavior for hook_permission_decision rows whose tool_use_id may be
+-- NULL — those rows do not collide inappropriately.
 CREATE TABLE IF NOT EXISTS hook_executions (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     attachment_uuid  TEXT NOT NULL,
@@ -79,7 +89,8 @@ CREATE TABLE IF NOT EXISTS hook_executions (
     stderr           TEXT,
     command          TEXT,
     decision         TEXT,
-    FOREIGN KEY (attachment_uuid) REFERENCES attachments(uuid)
+    FOREIGN KEY (attachment_uuid) REFERENCES attachments(uuid),
+    UNIQUE(attachment_uuid, hook_event, tool_use_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_hook_executions_tool_use_id
