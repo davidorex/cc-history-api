@@ -1,5 +1,13 @@
 # cc-history-api
 
+## Cross-session context
+
+- **Handoff ledger**: `.planning/STATE.md` — roadmap state (23 implementation commits across A/B/C/D tiers, all closed via Audit→Triage→Review chain), post-roadmap operational addendum (kickstart status, currently-open architectural debt), cross-session rebuild procedure for the in-session TaskList.
+- **Forensic records**: `.planning/audit/` — per-commit audit + triage + review docs; backfill execution forensics; investigation reports. Filename convention: `<topic>-YYYY-MM-DDThhmm-asia-shanghai.md`.
+- **Auto-loaded memory index**: `~/.claude/projects/-Users-david-Projects-cc-history-api/memory/MEMORY.md` — crucial operational patterns inline at top, then index of per-topic files (read on demand). Includes pointers to active architectural debt (attachment table backfill gap; ContentBlock inner-discriminator blind spot) and pending operational steps (MCPB UI install).
+
+Read STATE.md and the relevant memory topic file when picking up in-flight work; CLAUDE.md alone covers only operational protocols below.
+
 ## Post-Build Protocol
 
 After any `cargo build --release`: restart the daemon so the new binary is mmapped by the running process. The daemon serves all other projects via HTTP and UDS. A stale daemon means stale behavior system-wide.
