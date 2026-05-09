@@ -62,6 +62,7 @@ use crate::state::SharedState;
 ///   - GET /v1/schema
 ///   - GET /v1/schema/versions
 ///   - GET /v1/schema/drift
+///   - GET /v1/schema/record-type-drift
 ///
 /// **Projects:** [M2-P7, M2-P8]
 ///   - GET /v1/projects
@@ -118,6 +119,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/schema", get(schema::schema_full))
         .route("/v1/schema/versions", get(schema::versions))
         .route("/v1/schema/drift", get(schema::drift))
+        .route("/v1/schema/record-type-drift", get(schema::record_type_drift))
         // Projects [M2-P7, M2-P8]
         .route("/v1/projects", get(projects::list))
         .route("/v1/projects/{path}", get(projects::detail))

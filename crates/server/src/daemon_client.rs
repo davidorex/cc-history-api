@@ -32,8 +32,8 @@ use crate::api::health::HealthResponse;
 use claude_history_store::artifact_queries::{FileEntry, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{
-    MessageResult, ModelStats, SessionSummary, TokenStats, ToolStats, VersionDriftGroup,
-    VersionHistoryEntry,
+    MessageResult, ModelStats, RecordTypeDriftEntry, SessionSummary, TokenStats, ToolStats,
+    VersionDriftGroup, VersionHistoryEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -427,6 +427,39 @@ impl DaemonClient {
             "/v1/schema/drift".to_string()
         } else {
             format!("/v1/schema/drift?{}", params.join("&"))
+        };
+        self.get(&path).await
+    }
+
+    /// GET /v1/schema/record-type-drift — variant-level drift entries.
+    ///
+    /// Returns rows from `record_type_drift_log` (migration 007) with optional
+    /// filters. Companion to [`schema_drift_grouped`] for variant-level drift
+    /// (the JSONLRecord::Unknown discriminator) rather than field-level drift.
+    pub async fn record_type_drift(
+        &self,
+        type_name: Option<&str>,
+        version: Option<&str>,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<RecordTypeDriftEntry>, DaemonError> {
+        let mut params = Vec::new();
+        if let Some(tn) = type_name {
+            params.push(format!("type_name={}", urlencoded(tn)));
+        }
+        if let Some(v) = version {
+            params.push(format!("version={}", urlencoded(v)));
+        }
+        if let Some(s) = since {
+            params.push(format!("since={}", urlencoded(s)));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        let path = if params.is_empty() {
+            "/v1/schema/record-type-drift".to_string()
+        } else {
+            format!("/v1/schema/record-type-drift?{}", params.join("&"))
         };
         self.get(&path).await
     }

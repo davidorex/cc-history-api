@@ -17,6 +17,7 @@
 //!   claude-history export <session-id> [--format json|markdown|csv]
 //!   claude-history version-check [--json]
 //!   claude-history schema-drift [--record-type <type>] [--limit N] [--json]
+//!   claude-history record-type-drift [--type-name <name>] [--version <v>] [--since <date>] [--limit N] [--json]
 //!   claude-history files [--session-id <id>] [--path <substr>] [--limit N] [--json]
 //!   claude-history file-history <path> [--session-id <id>] [--limit N] [--json]
 //!   claude-history reconstruct <path> --session-id <id> [--at <uuid>]
@@ -168,6 +169,30 @@ enum Commands {
         /// Filter by record type
         #[arg(long)]
         record_type: Option<String>,
+        /// Maximum entries to show
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show record-type drift events (unknown JSONL discriminators)
+    ///
+    /// Companion to schema-drift. Where schema-drift surfaces unknown fields on
+    /// a known record type, this surfaces records whose top-level `type` value
+    /// did not match any of the seven modeled JSONLRecord variants and was
+    /// captured to record_type_drift_log via the JSONLRecord::Unknown path
+    /// introduced in B1.1.
+    RecordTypeDrift {
+        /// Filter by type_name (substring match)
+        #[arg(long)]
+        type_name: Option<String>,
+        /// Filter by exact Claude Code version
+        #[arg(long)]
+        version: Option<String>,
+        /// Lower bound on last_seen_at (ISO-8601 text, e.g. 2026-04-01)
+        #[arg(long)]
+        since: Option<String>,
         /// Maximum entries to show
         #[arg(long, default_value = "50")]
         limit: usize,
@@ -753,6 +778,13 @@ async fn main() -> ExitCode {
                     limit,
                     json,
                 } => run_schema_drift(mode, record_type, limit, json).await,
+                Commands::RecordTypeDrift {
+                    type_name,
+                    version,
+                    since,
+                    limit,
+                    json,
+                } => run_record_type_drift(mode, type_name, version, since, limit, json).await,
                 Commands::Files {
                     session_id,
                     path,
@@ -1476,6 +1508,84 @@ async fn run_schema_drift(
         }
     } else {
         output::print_drift_grouped(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Show record-type drift events from `record_type_drift_log` (migration 007).
+///
+/// Routes through the daemon HTTP API when available, falling back to a direct
+/// DB connection. Output mirrors the `schema-drift` subcommand's table/JSON
+/// shape but operates on the variant-level drift table populated by the
+/// JSONLRecord::Unknown path introduced in B1.1 and the bytewise re-ingestion
+/// completed in B1.2.
+async fn run_record_type_drift(
+    mode: ConnectionMode,
+    type_name: Option<String>,
+    version: Option<String>,
+    since: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let results = match mode {
+        ConnectionMode::Daemon(client) => {
+            tracing::info!(
+                socket = %client.socket_path().display(),
+                "Routing record-type-drift through daemon"
+            );
+            match client
+                .record_type_drift(
+                    type_name.as_deref(),
+                    version.as_deref(),
+                    since.as_deref(),
+                    Some(limit),
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Daemon record-type-drift query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        ConnectionMode::Direct { conn, .. } => {
+            let type_name_owned = type_name.clone();
+            let version_owned = version.clone();
+            let since_owned = since.clone();
+            match conn
+                .call(move |conn| {
+                    claude_history_store::query::record_type_drift_list(
+                        conn,
+                        type_name_owned.as_deref(),
+                        version_owned.as_deref(),
+                        since_owned.as_deref(),
+                        Some(limit),
+                    )
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: Record-type drift query failed: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+
+    if results.is_empty() {
+        eprintln!("No record-type drift detected.");
+        return ExitCode::SUCCESS;
+    }
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_record_type_drift(&results);
     }
 
     ExitCode::SUCCESS

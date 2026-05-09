@@ -26,7 +26,7 @@ use crate::state::SharedState;
 
 // Re-export store query result types used as JSON response bodies.
 use claude_history_store::query::{
-    VersionDiffEntry, VersionDriftGroup, VersionHistoryEntry,
+    RecordTypeDriftEntry, VersionDiffEntry, VersionDriftGroup, VersionHistoryEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +89,24 @@ pub struct DriftParams {
     /// Filter drift entries by record_type (substring match).
     pub record_type: Option<String>,
     /// Maximum entries to return. If omitted, returns all matching entries.
+    pub limit: Option<usize>,
+}
+
+/// Query parameters for GET /v1/schema/record-type-drift.
+///
+/// Mirrors the CLI subcommand `claude-history record-type-drift` filter set.
+/// All filters are optional and combine with logical AND. The substring match
+/// for `type_name` runs in the store layer via parameterized LIKE.
+#[derive(Debug, Deserialize)]
+pub struct RecordTypeDriftParams {
+    /// Filter by `type_name` (substring match against the record discriminator).
+    pub type_name: Option<String>,
+    /// Filter by exact `version` (matches `record_type_drift_log.version`).
+    pub version: Option<String>,
+    /// Lower bound on `last_seen_at` (ISO-8601 text matching the SQLite
+    /// `datetime()` format used in the table).
+    pub since: Option<String>,
+    /// Maximum rows to return. If omitted, returns all matching entries.
     pub limit: Option<usize>,
 }
 
@@ -196,6 +214,36 @@ pub async fn drift(
     }
 
     Ok(Json(groups))
+}
+
+/// Handler for GET /v1/schema/record-type-drift.
+///
+/// Returns rows from `record_type_drift_log` (migration 007) — variant-level
+/// schema-drift telemetry for records whose top-level `type` discriminator is
+/// not one of the seven known JSONLRecord variants. Companion endpoint to
+/// `/v1/schema/drift`, which covers field-level drift on known variants.
+///
+/// Supports optional filters: `type_name` (substring), `version` (exact match),
+/// `since` (lower bound on `last_seen_at`), and `limit` (cap on rows). All
+/// filtering happens in SQL via parameterized binding; the response is a flat
+/// JSON array of [`RecordTypeDriftEntry`] ordered by `last_seen_at` DESC.
+pub async fn record_type_drift(
+    State(state): State<SharedState>,
+    Query(params): Query<RecordTypeDriftParams>,
+) -> Result<Json<Vec<RecordTypeDriftEntry>>, ApiError> {
+    let entries = state
+        .conn
+        .call(move |conn| {
+            claude_history_store::query::record_type_drift_list(
+                conn,
+                params.type_name.as_deref(),
+                params.version.as_deref(),
+                params.since.as_deref(),
+                params.limit,
+            )
+        })
+        .await?;
+    Ok(Json(entries))
 }
 
 /// Handler for GET /v1/schema.

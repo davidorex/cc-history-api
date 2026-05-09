@@ -13,7 +13,8 @@ use chrono::{DateTime, Local, Utc};
 use claude_history_store::artifact_queries::{FileEntry, FileOperation, GitOperation, SessionArtifacts};
 use claude_history_store::fts::SearchResult;
 use claude_history_store::query::{
-    ModelStats, SessionSummary, TokenStats, ToolStats, VersionDriftGroup, VersionHistoryEntry,
+    ModelStats, RecordTypeDriftEntry, SessionSummary, TokenStats, ToolStats, VersionDriftGroup,
+    VersionHistoryEntry,
 };
 
 /// Convert a UTC timestamp string to local time for display.
@@ -491,6 +492,58 @@ pub fn print_drift_grouped(groups: &[VersionDriftGroup]) {
                 );
             }
         }
+    }
+}
+
+/// Print record-type drift entries in a column-aligned table.
+///
+/// Columns: TYPE_NAME (24 chars), VERSION (10 chars), OCCURRENCES (right-aligned),
+/// LAST_SEEN (local time), SAMPLE (truncated to 60 chars). Mirrors the column
+/// shape used by [`print_drift_grouped`] but operates on the flat list shape
+/// of `record_type_drift_log` (no version/record-type grouping).
+pub fn print_record_type_drift(entries: &[RecordTypeDriftEntry]) {
+    if entries.is_empty() {
+        println!("No record-type drift detected.");
+        return;
+    }
+
+    println!(
+        "{:<24}  {:<10}  {:>11}  {:<19}  {:<60}",
+        "TYPE_NAME", "VERSION", "OCCURRENCES", "LAST_SEEN", "SAMPLE"
+    );
+    println!(
+        "{:<24}  {:<10}  {:>11}  {:<19}  {:<60}",
+        "------------------------",
+        "----------",
+        "-----------",
+        "-------------------",
+        "------------------------------------------------------------"
+    );
+
+    for entry in entries {
+        let type_display = if entry.type_name.len() > 24 {
+            &entry.type_name[..24]
+        } else {
+            &entry.type_name
+        };
+        let version_display = entry.version.as_deref().unwrap_or("-");
+        let version_truncated = if version_display.len() > 10 {
+            &version_display[..10]
+        } else {
+            version_display
+        };
+        let last_seen = to_local(&entry.last_seen_at);
+        let sample_default = "-".to_string();
+        let sample = entry.sample_value.as_ref().unwrap_or(&sample_default);
+        let sample_display = if sample.len() > 60 {
+            &sample[..60]
+        } else {
+            sample.as_str()
+        };
+        println!(
+            "{:<24}  {:<10}  {:>11}  {:<19}  {:<60}",
+            type_display, version_truncated, entry.occurrence_count, last_seen, sample_display
+        );
     }
 }
 

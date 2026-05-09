@@ -212,15 +212,44 @@ pub fn log_record_overflow(
         }
 
         // The Unknown variant has no per-field overflow HashMap — its entire
-        // payload is the raw JSON Value, captured by `decompose_unknown` to
-        // `record_type_drift_log` (a different table from `schema_drift_log`).
-        // The variant-level drift is recorded there, not here. B1.2 may
-        // extend this arm to additionally inspect `raw` for unknown fields
-        // and surface them in `schema_drift_log` once a future record-type
-        // structure is modeled; for B1.1 the arm is a no-op so that the
-        // existing log_record_overflow contract for the seven typed variants
-        // is unchanged and the compiler exhaustiveness check is satisfied.
-        JSONLRecord::Unknown { .. } => Ok(0),
+        // payload is the raw JSON Value. Production ingestion routes through
+        // `decompose_record` -> `decompose_unknown`, which already calls
+        // `log_record_type_drift`, so calling `log_record_overflow` on an
+        // Unknown record is not the standard ingestion path. The arm exists
+        // for callers that use `log_record_overflow` directly (tests, future
+        // batch tooling, ad-hoc inspection) and for compiler exhaustiveness.
+        //
+        // B1.2 wires the arm into `log_record_type_drift` so the function's
+        // public contract — "log every drift signal carried by a record" —
+        // applies uniformly across all eight variants. The two callers
+        // (decompose_unknown and this arm) are both idempotent against the
+        // same UNIQUE(type_name, version) constraint, so any double-invocation
+        // simply increments `occurrence_count`; in practice production code
+        // calls only one of them per record.
+        //
+        // `version` is extracted from `raw.version` if present and a string;
+        // some unknown discriminators (`last-prompt`, `custom-title`) carry
+        // no version field and record SQL NULL, matching `decompose_unknown`.
+        // The sample is the raw JSON serialization truncated to
+        // `MAX_SAMPLE_VALUE_LEN` on a UTF-8 char boundary, mirroring the
+        // truncation policy of `log_overflow` so the two drift tables produce
+        // comparable forensic samples.
+        JSONLRecord::Unknown { type_name, raw } => {
+            let version = raw
+                .get("version")
+                .and_then(|v| v.as_str());
+            let raw_json = raw.to_string();
+            let sample_value = if raw_json.len() > MAX_SAMPLE_VALUE_LEN {
+                let mut cut = MAX_SAMPLE_VALUE_LEN;
+                while !raw_json.is_char_boundary(cut) && cut > 0 {
+                    cut -= 1;
+                }
+                format!("{}...", &raw_json[..cut])
+            } else {
+                raw_json
+            };
+            log_record_type_drift(type_name, version, &sample_value, tx)
+        }
     }
 }
 
@@ -774,6 +803,102 @@ mod tests {
             version.is_none(),
             "last-prompt has no version field; column must be NULL"
         );
+    }
+
+    /// B1.2: log_record_overflow's Unknown arm writes a row to
+    /// record_type_drift_log via log_record_type_drift. This is the
+    /// non-decompose path for callers that hold a parsed JSONLRecord and
+    /// want to surface variant-level drift without going through the
+    /// decompose dispatcher.
+    #[test]
+    fn test_log_record_overflow_unknown_writes_drift_row() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let json = r#"{
+            "type": "permission-mode",
+            "version": "2.1.123",
+            "sessionId": "sess-pm",
+            "mode": "acceptEdits"
+        }"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+
+        match &record {
+            JSONLRecord::Unknown { type_name, .. } => {
+                assert_eq!(type_name, "permission-mode");
+            }
+            _ => panic!("expected Unknown variant"),
+        }
+
+        let changed = log_record_overflow(&record, &tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            changed, 1,
+            "Unknown arm should report 1 drift-log row changed"
+        );
+
+        let (type_name, version, occ): (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT type_name, version, occurrence_count
+                 FROM record_type_drift_log
+                 WHERE type_name = 'permission-mode'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(type_name, "permission-mode");
+        assert_eq!(version.as_deref(), Some("2.1.123"));
+        assert_eq!(occ, 1, "first observation should produce occurrence_count=1");
+
+        // Re-observe via log_record_overflow on the same record: the row
+        // should remain singular and occurrence_count should advance to 2.
+        let tx2 = conn.unchecked_transaction().unwrap();
+        let changed2 = log_record_overflow(&record, &tx2).unwrap();
+        tx2.commit().unwrap();
+        assert_eq!(changed2, 1, "ON CONFLICT DO UPDATE returns 1");
+
+        let occ2: i64 = conn
+            .query_row(
+                "SELECT occurrence_count FROM record_type_drift_log
+                 WHERE type_name = 'permission-mode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(occ2, 2);
+
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM record_type_drift_log",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 1, "two observations should produce one row");
+    }
+
+    /// B1.2: an Unknown record without a `version` field records SQL NULL
+    /// in the version column when routed through log_record_overflow,
+    /// matching decompose_unknown's contract.
+    #[test]
+    fn test_log_record_overflow_unknown_no_version() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // last-prompt: no version field per corpus survey.
+        let json = r#"{"type":"last-prompt","lastPrompt":"hi","sessionId":"sess-lp"}"#;
+        let record: JSONLRecord = serde_json::from_str(json).unwrap();
+        log_record_overflow(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        let version: Option<String> = conn
+            .query_row(
+                "SELECT version FROM record_type_drift_log WHERE type_name = 'last-prompt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(version.is_none(), "no version field => NULL");
     }
 
     /// Test: the sample_value is truncated for very large unknown payloads

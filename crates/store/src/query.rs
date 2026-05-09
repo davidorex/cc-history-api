@@ -90,6 +90,23 @@ pub struct DriftEntry {
     pub source_context: Option<String>,
 }
 
+/// Record-type drift log entry — one row per (type_name, version) observed.
+///
+/// Mirrors the shape of the `record_type_drift_log` table introduced in
+/// migration 007. Where `DriftEntry` represents an unknown *field* on a known
+/// record type, this represents an unknown top-level *record type*
+/// (the JSONLRecord::Unknown variant). The two are disjoint sources of
+/// schema-evolution telemetry and live in separate tables.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecordTypeDriftEntry {
+    pub type_name: String,
+    pub version: Option<String>,
+    pub sample_value: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub occurrence_count: i64,
+}
+
 /// Detailed session information for the API `GET /sessions/:id` endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionDetail {
@@ -607,6 +624,76 @@ pub fn version_history(conn: &Connection) -> Result<Vec<VersionEntry>, rusqlite:
             version: row.get(0)?,
             first_seen: row.get(1)?,
             last_seen: row.get(2)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// List record-type drift log entries with optional filters.
+///
+/// Returns rows from `record_type_drift_log` ordered by `last_seen_at`
+/// descending (most recent first). Optional filters narrow the result set:
+/// - `type_name`: substring match against `type_name` (e.g. `attachment`)
+/// - `version`: exact match against `version`
+/// - `since`: lower bound (inclusive) on `last_seen_at` as ISO-8601 text;
+///   matches the SQLite `datetime()` text format used in the table
+/// - `limit`: cap on rows returned (None = no cap)
+///
+/// All filters bind via parameterized SQL; no user-provided values are
+/// interpolated. The substring match for `type_name` uses LIKE with
+/// runtime-escaped `%` wildcards.
+pub fn record_type_drift_list(
+    conn: &Connection,
+    type_name: Option<&str>,
+    version: Option<&str>,
+    since: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<RecordTypeDriftEntry>, rusqlite::Error> {
+    let mut sql = String::from(
+        "SELECT type_name, version, sample_value, first_seen_at, last_seen_at, occurrence_count
+         FROM record_type_drift_log
+         WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(tn) = type_name {
+        sql.push_str(" AND type_name LIKE ?");
+        // Wrap with %...% for substring match; LIKE wildcards in user input are
+        // escaped to literal % and _ via the ESCAPE clause.
+        let escaped = tn.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        sql.push_str(" ESCAPE '\\'");
+        params.push(Box::new(format!("%{}%", escaped)));
+    }
+
+    if let Some(v) = version {
+        sql.push_str(" AND version = ?");
+        params.push(Box::new(v.to_string()));
+    }
+
+    if let Some(s) = since {
+        sql.push_str(" AND last_seen_at >= ?");
+        params.push(Box::new(s.to_string()));
+    }
+
+    sql.push_str(" ORDER BY last_seen_at DESC");
+
+    if let Some(l) = limit {
+        sql.push_str(" LIMIT ?");
+        params.push(Box::new(l as i64));
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|b| b.as_ref()).collect();
+    let results = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(RecordTypeDriftEntry {
+            type_name: row.get(0)?,
+            version: row.get(1)?,
+            sample_value: row.get(2)?,
+            first_seen_at: row.get(3)?,
+            last_seen_at: row.get(4)?,
+            occurrence_count: row.get(5)?,
         })
     })?;
 
@@ -1681,5 +1768,87 @@ mod tests {
         // Find unknown_exotic_field -> should be "extra_json"
         let extra = user_group.fields.iter().find(|f| f.field_name == "unknown_exotic_field").unwrap();
         assert_eq!(extra.promotion_status, "extra_json");
+    }
+
+    // -----------------------------------------------------------------------
+    // record_type_drift_list — B1.2
+    //
+    // Cover three filter combinations that mirror the CLI subcommand surface:
+    // unfiltered listing, type_name substring filter, and version exact match.
+    // These exercise the parameterized SQL path in record_type_drift_list and
+    // confirm ordering by last_seen_at descending.
+    // -----------------------------------------------------------------------
+
+    fn seed_record_type_drift(
+        conn: &Connection,
+        type_name: &str,
+        version: Option<&str>,
+        sample: &str,
+        last_seen: &str,
+        occurrence_count: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO record_type_drift_log
+             (type_name, version, sample_value, first_seen_at, last_seen_at, occurrence_count)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+            rusqlite::params![type_name, version, sample, last_seen, occurrence_count],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_record_type_drift_list_no_filters() {
+        let conn = setup_db();
+        seed_record_type_drift(&conn, "attachment", Some("2.1.126"), "{}", "2026-05-01T00:00:00", 100);
+        seed_record_type_drift(&conn, "last-prompt", None, "{}", "2026-05-02T00:00:00", 50);
+        seed_record_type_drift(&conn, "custom-title", Some("2.1.121"), "{}", "2026-05-03T00:00:00", 25);
+
+        let entries = record_type_drift_list(&conn, None, None, None, None).unwrap();
+        assert_eq!(entries.len(), 3);
+        // Ordered by last_seen_at DESC.
+        assert_eq!(entries[0].type_name, "custom-title");
+        assert_eq!(entries[1].type_name, "last-prompt");
+        assert_eq!(entries[2].type_name, "attachment");
+    }
+
+    #[test]
+    fn test_record_type_drift_list_type_name_substring() {
+        let conn = setup_db();
+        seed_record_type_drift(&conn, "attachment", Some("2.1.126"), "{}", "2026-05-01T00:00:00", 100);
+        seed_record_type_drift(&conn, "last-prompt", None, "{}", "2026-05-02T00:00:00", 50);
+        seed_record_type_drift(&conn, "permission-mode", Some("2.1.126"), "{}", "2026-05-03T00:00:00", 12);
+
+        let entries =
+            record_type_drift_list(&conn, Some("prompt"), None, None, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].type_name, "last-prompt");
+    }
+
+    #[test]
+    fn test_record_type_drift_list_version_and_limit() {
+        let conn = setup_db();
+        seed_record_type_drift(&conn, "attachment", Some("2.1.126"), "{}", "2026-05-01T00:00:00", 100);
+        seed_record_type_drift(&conn, "permission-mode", Some("2.1.126"), "{}", "2026-05-02T00:00:00", 12);
+        seed_record_type_drift(&conn, "agent-name", Some("2.1.121"), "{}", "2026-05-03T00:00:00", 8);
+
+        let entries =
+            record_type_drift_list(&conn, None, Some("2.1.126"), None, None).unwrap();
+        assert_eq!(entries.len(), 2, "version filter narrows to two rows");
+        assert!(entries.iter().all(|e| e.version.as_deref() == Some("2.1.126")));
+
+        let limited = record_type_drift_list(&conn, None, None, None, Some(1)).unwrap();
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[test]
+    fn test_record_type_drift_list_since_filter() {
+        let conn = setup_db();
+        seed_record_type_drift(&conn, "old-type", Some("2.0.0"), "{}", "2026-04-01T00:00:00", 1);
+        seed_record_type_drift(&conn, "new-type", Some("2.1.126"), "{}", "2026-05-01T00:00:00", 1);
+
+        let entries =
+            record_type_drift_list(&conn, None, None, Some("2026-04-15T00:00:00"), None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].type_name, "new-type");
     }
 }
