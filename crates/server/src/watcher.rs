@@ -956,4 +956,249 @@ mod tests {
         // Best-effort cleanup of the on-disk DB file.
         let _ = std::fs::remove_file(&db_path);
     }
+
+    /// D4 integration regression test: exercises D1's `sync_all` backfill and
+    /// D3's `check_version_change` re-derive semantic in sequence against a
+    /// shared fixture DB. D1 and D3 each ship with their own focused in-file
+    /// regression test (in `crates/store/src/sync.rs` and above in this module
+    /// respectively); this test owns the boundary between them.
+    ///
+    /// Why this file (Option A): the test calls into both
+    /// `claude_history_store::sync::sync_all` (D1's surface) and
+    /// `check_version_change` (D3's surface, private to this module). Putting
+    /// the test here lets it call `check_version_change` directly without
+    /// widening that function's visibility. The reverse placement (in
+    /// `crates/store/src/sync.rs`) is not viable because the store crate does
+    /// not — and should not — depend on the server crate; server depends on
+    /// store, not vice versa.
+    ///
+    /// Setup (load-bearing math):
+    ///
+    ///   Phase 1 — D1 surface:
+    ///     - 3 JSONL files, one session per file, three distinct versions
+    ///       (2.1.99, 2.1.100, 2.1.101).
+    ///     - sync_all runs; D1's INSERT OR IGNORE … COUNT(*) backfill writes
+    ///       one version_history row per version with session_count = 1.
+    ///
+    ///   Phase 2 — D3 surface:
+    ///     - Insert 2 ADDITIONAL sessions rows directly at version 2.1.99
+    ///       (sessions table now holds 3 distinct sessions at that version).
+    ///     - Build a WatcherState with `last_known_version` set to a different
+    ///       string so check_version_change takes the "changed" branch and
+    ///       reaches the ON CONFLICT upsert against the existing 2.1.99 row.
+    ///     - Call check_version_change for one of the new sessions.
+    ///
+    /// Discriminating assertion:
+    ///     - With D3 in place: ON CONFLICT re-derives session_count via
+    ///       `(SELECT COUNT(*) FROM sessions WHERE version = ?1)` → 3.
+    ///     - Without D3 (hypothetical pre-D3 `+1` path): the D1-populated row
+    ///       at session_count = 1 plus 1 → 2.
+    ///     - Asserting `session_count == 3` therefore distinguishes the
+    ///       D1+D3 pair from a D1-only world that retained the +1 increment.
+    ///       A naive choice of "2 sessions at the version" would not be
+    ///       discriminating because pre-D3 math yields 2 by coincidence
+    ///       (1 from D1 + 1 from increment).
+    ///
+    /// The test does not exercise watcher_loop or any spawned task — it calls
+    /// sync_all and check_version_change directly. No CancellationToken is
+    /// required because no task is spawned.
+    #[tokio::test]
+    async fn d4_integration_sync_all_then_live_check_version_change() {
+        // PID-scoped temp dir + DB so parallel test invocations do not collide.
+        let tmp_dir = std::env::temp_dir().join("claude-history-watcher-d4-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let projects_dir = tmp_dir.join(format!("d4-projects-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&projects_dir);
+        std::fs::create_dir_all(&projects_dir).expect("should create projects dir");
+        let db_path = tmp_dir.join(format!("d4-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = claude_history_store::db::init_db(&db_path)
+            .await
+            .expect("init_db should succeed for D4 test");
+
+        // -------------------- Phase 1 — D1 surface --------------------
+        // Three JSONL files at three distinct versions, one user record each.
+        // Each file's filename is `<session-id>.jsonl` so that
+        // `extract_session_id` recovers the session UUID correctly.
+        let fixtures: &[(&str, &str)] = &[
+            ("d4-session-99",  "2.1.99"),
+            ("d4-session-100", "2.1.100"),
+            ("d4-session-101", "2.1.101"),
+        ];
+
+        for (i, (session, version)) in fixtures.iter().enumerate() {
+            let line = format!(
+                r#"{{"type":"user","uuid":"d4-uuid-{i}","timestamp":"2026-02-20T01:00:00Z","sessionId":"{session}","version":"{version}","cwd":"/tmp","isSidechain":false,"userType":"external","gitBranch":"main","message":{{"role":"user","content":"hello"}}}}"#,
+                i = i,
+                session = session,
+                version = version,
+            );
+            let file_path = projects_dir.join(format!("{}.jsonl", session));
+            std::fs::write(&file_path, format!("{}\n", line))
+                .expect("should write fixture jsonl");
+        }
+
+        // Run sync_all. D1's backfill block at end of sync_all populates
+        // version_history from the sessions table.
+        let sync_result = claude_history_store::sync::sync_all(&conn, &projects_dir)
+            .await
+            .expect("sync_all should succeed for D4 fixture");
+        assert_eq!(
+            sync_result.files_synced, 3,
+            "all three fixture JSONL files should sync as new"
+        );
+
+        // D1 invariant: version_history has exactly one row per distinct
+        // version, and per-version session_count matches sessions truth.
+        let vh_count: i64 = conn
+            .call(|c| {
+                c.query_row("SELECT COUNT(*) FROM version_history", [], |row| row.get(0))
+            })
+            .await
+            .expect("count version_history after sync_all");
+        assert_eq!(
+            vh_count, 3,
+            "D1 baseline: version_history should have exactly 3 rows after sync_all (one per distinct version)"
+        );
+
+        for (_session, version) in fixtures.iter() {
+            let v = (*version).to_string();
+            let v_for_query = v.clone();
+            let backfilled_count: i64 = conn
+                .call(move |c| {
+                    c.query_row(
+                        "SELECT session_count FROM version_history WHERE version = ?1",
+                        [&v_for_query],
+                        |row| row.get(0),
+                    )
+                })
+                .await
+                .expect("read backfilled session_count");
+            assert_eq!(
+                backfilled_count, 1,
+                "D1 baseline: session_count for version {} should equal 1 (one session per version in phase 1)",
+                v
+            );
+        }
+
+        // -------------------- Phase 2 — D3 surface --------------------
+        // Insert two MORE sessions at version 2.1.99 directly into the
+        // sessions table. Now COUNT(*) FROM sessions WHERE version='2.1.99'
+        // is 3 (the original phase-1 session plus these two). The
+        // version_history row written by D1 still says session_count = 1.
+        // This is the divergence the D3 path is supposed to reconcile.
+        conn.call(|c| {
+            c.execute_batch(
+                "INSERT INTO sessions (session_id, project_path, first_seen_at, version)
+                 VALUES ('d4-session-99-extra-a', '/tmp/d4', datetime('now'), '2.1.99');
+                 INSERT INTO sessions (session_id, project_path, first_seen_at, version)
+                 VALUES ('d4-session-99-extra-b', '/tmp/d4', datetime('now'), '2.1.99');",
+            )
+            .map_err(tokio_rusqlite::Error::from)
+        })
+        .await
+        .expect("seed two additional sessions at version 2.1.99");
+
+        // Sanity check before triggering D3's path: sessions truth is 3,
+        // version_history is still at 1 (D1's INSERT OR IGNORE skipped the
+        // already-present row when phase 2's inserts happened — but those
+        // direct INSERTs into sessions did not touch version_history at all,
+        // so the row remains exactly as D1 left it).
+        let truth_at_99: i64 = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE version = '2.1.99'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("count sessions at 2.1.99");
+        assert_eq!(
+            truth_at_99, 3,
+            "phase-2 setup invariant: sessions table holds 3 rows at version 2.1.99"
+        );
+
+        let pre_check_vh_count: i64 = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT session_count FROM version_history WHERE version = '2.1.99'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("read pre-check version_history.session_count");
+        assert_eq!(
+            pre_check_vh_count, 1,
+            "phase-2 setup invariant: version_history row for 2.1.99 still says 1 (D1 wrote it; raw sessions inserts did not update it)"
+        );
+
+        // Build a WatcherState whose last_known_version differs from 2.1.99
+        // so check_version_change takes the "changed" branch and reaches
+        // the ON CONFLICT upsert. Choose one of the freshly-inserted
+        // session IDs so the SELECT version FROM sessions WHERE session_id=?
+        // in check_version_change resolves to "2.1.99".
+        let mut state = WatcherState {
+            debouncer: FileDebouncer::new(2),
+            last_known_version: Some("2.1.0-prior".to_string()),
+            data_ingested_since_fts_rebuild: false,
+            last_fts_rebuild: Instant::now(),
+        };
+        let (event_tx, _event_rx) = broadcast::channel::<SseEvent>(16);
+
+        check_version_change(&mut state, &conn, "d4-session-99-extra-a", &event_tx).await;
+
+        // -------------------- Discriminating assertion --------------------
+        // Post-D3: session_count = (SELECT COUNT(*) FROM sessions WHERE version='2.1.99') = 3.
+        // Pre-D3 (+1 path): session_count = 1 (D1's value) + 1 = 2.
+        let observed_count: i64 = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT session_count FROM version_history WHERE version = '2.1.99'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("read post-check session_count for 2.1.99");
+
+        assert_eq!(
+            observed_count, 3,
+            "D4 integration: after D1 backfill (session_count=1) AND a subsequent \
+             check_version_change against 3-sessions-at-version truth, D3's \
+             re-derive path must set session_count = 3 (COUNT(*) FROM sessions). \
+             A pre-D3 +1 path would have produced 2 here (1 + 1), so this \
+             assertion distinguishes D1+D3 from a D1-only world."
+        );
+
+        // The other two versions' rows must remain untouched at session_count=1
+        // — check_version_change only touched the row for the version it
+        // observed on the queried session.
+        for v in ["2.1.100", "2.1.101"].iter() {
+            let v_owned = (*v).to_string();
+            let v_for_query = v_owned.clone();
+            let other_count: i64 = conn
+                .call(move |c| {
+                    c.query_row(
+                        "SELECT session_count FROM version_history WHERE version = ?1",
+                        [&v_for_query],
+                        |row| row.get(0),
+                    )
+                })
+                .await
+                .expect("read untouched version_history row");
+            assert_eq!(
+                other_count, 1,
+                "version_history row for {} should remain at 1; check_version_change \
+                 only re-derives the row for the version on the session it was called with",
+                v_owned
+            );
+        }
+
+        // Best-effort cleanup of the temp DB file and projects dir.
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&projects_dir);
+    }
 }
