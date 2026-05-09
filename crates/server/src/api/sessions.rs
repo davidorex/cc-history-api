@@ -40,6 +40,10 @@ pub struct SessionsParams {
     pub before: Option<String>,
     /// Maximum sessions to return. Defaults to 50.
     pub limit: Option<usize>,
+    /// (C2.4) Filter to sessions holding (`true`) / lacking (`false`) at
+    /// least one message with `plan_content IS NOT NULL`. Absent / `None`
+    /// preserves legacy behavior (no filter).
+    pub has_plan: Option<bool>,
 }
 
 /// Query parameters for GET /v1/sessions/:id/conversation.
@@ -77,6 +81,7 @@ pub async fn list(
                 params.project.as_deref(),
                 params.after.as_deref(),
                 params.before.as_deref(),
+                params.has_plan,
                 limit,
             )
         })

@@ -109,6 +109,11 @@ enum Commands {
         /// Show sessions before this date (YYYY-MM-DD or ISO8601)
         #[arg(long)]
         before: Option<String>,
+        /// (C2.4) Restrict to sessions with at least one plan-bearing
+        /// message (`plan_content IS NOT NULL`). Pair with `--no-has-plan`
+        /// for the inverse.
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
+        has_plan: Option<bool>,
         /// Maximum sessions to return
         #[arg(long, default_value = "50")]
         limit: usize,
@@ -278,6 +283,11 @@ enum Commands {
         #[command(subcommand)]
         action: AttachmentsAction,
     },
+    /// List or show user-typed plan markdown (C2.4)
+    Plans {
+        #[command(subcommand)]
+        action: PlansAction,
+    },
     /// List hook_executions rows (C1.4)
     HookExecutions {
         /// Filter by exact tool_use_id
@@ -355,6 +365,33 @@ enum AttachmentsAction {
     Show {
         /// Attachment UUID
         uuid: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlansAction {
+    /// List plan-bearing messages with optional filters
+    List {
+        /// Filter by project path (substring match)
+        #[arg(long)]
+        project: Option<String>,
+        /// Show plans after this timestamp (ISO-8601)
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum rows to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show full plan markdown for every plan-bearing message in a session
+    Show {
+        /// Session ID
+        session_id: String,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -814,9 +851,10 @@ async fn main() -> ExitCode {
                     project,
                     after,
                     before,
+                    has_plan,
                     limit,
                     json,
-                } => run_sessions(mode, project, after, before, limit, json).await,
+                } => run_sessions(mode, project, after, before, has_plan, limit, json).await,
                 Commands::Query {
                     session_id,
                     message_type,
@@ -872,6 +910,7 @@ async fn main() -> ExitCode {
                     run_artifacts(mode, session_id, json).await
                 }
                 Commands::Attachments { action } => run_attachments(mode, action).await,
+                Commands::Plans { action } => run_plans(mode, action).await,
                 Commands::HookExecutions {
                     tool_use_id,
                     hook_event,
@@ -1146,6 +1185,7 @@ async fn run_sessions(
     project: Option<String>,
     after: Option<String>,
     before: Option<String>,
+    has_plan: Option<bool>,
     limit: usize,
     json: bool,
 ) -> ExitCode {
@@ -1160,6 +1200,7 @@ async fn run_sessions(
                     project.as_deref(),
                     after.as_deref(),
                     before.as_deref(),
+                    has_plan,
                     Some(limit),
                 )
                 .await
@@ -1179,6 +1220,7 @@ async fn run_sessions(
                         project.as_deref(),
                         after.as_deref(),
                         before.as_deref(),
+                        has_plan,
                         limit,
                     )
                 })
@@ -1797,6 +1839,140 @@ async fn run_attachments_show(mode: ConnectionMode, uuid: String, json: bool) ->
             ExitCode::SUCCESS
         }
     }
+}
+
+/// Dispatcher for the `plans` subcommand (C2.4).
+///
+/// Routes to list / show. Both go direct-to-DB regardless of daemon
+/// availability: the daemon's `/v1/plans` REST endpoints are C2.6
+/// territory and not yet present, so daemon-routing would fail with
+/// `404` here. `ensure_direct_conn` opens a fresh `tokio_rusqlite`
+/// connection from `CLAUDE_HISTORY_DB_PATH` / `--db-path` / default
+/// when the resolved mode was `Daemon`, and reuses the existing direct
+/// connection when it is already `Direct`.
+async fn run_plans(mode: ConnectionMode, action: PlansAction) -> ExitCode {
+    let conn = match ensure_direct_conn(mode).await {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("Error: {}", msg);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match action {
+        PlansAction::List {
+            project,
+            since,
+            limit,
+            json,
+        } => run_plans_list(conn, project, since, limit, json).await,
+        PlansAction::Show { session_id, json } => {
+            run_plans_show(conn, session_id, json).await
+        }
+    }
+}
+
+/// Coerce a `ConnectionMode` into a direct `tokio_rusqlite::Connection`.
+///
+/// When `Daemon` is active, opens a fresh DB connection at the resolved
+/// db_path. When already `Direct`, reuses the existing connection. The
+/// extra connection in daemon mode runs alongside the daemon's own
+/// connection — SQLite handles concurrent readers cleanly under WAL
+/// mode (the schema's default).
+async fn ensure_direct_conn(
+    mode: ConnectionMode,
+) -> Result<tokio_rusqlite::Connection, String> {
+    match mode {
+        ConnectionMode::Direct { conn, .. } => Ok(conn),
+        ConnectionMode::Daemon(_) => {
+            let db_path = resolve_db_path(None).ok_or_else(|| {
+                "Could not determine database path for plans subcommand.".to_string()
+            })?;
+            tokio_rusqlite::Connection::open(&db_path)
+                .await
+                .map_err(|e| format!("Failed to open DB at {}: {}", db_path.display(), e))
+        }
+    }
+}
+
+/// `claude-history plans list` — list plan-bearing messages with filters.
+async fn run_plans_list(
+    conn: tokio_rusqlite::Connection,
+    project: Option<String>,
+    since: Option<String>,
+    limit: usize,
+    json: bool,
+) -> ExitCode {
+    let project_owned = project.clone();
+    let since_owned = since.clone();
+    let results = match conn
+        .call(move |conn| {
+            claude_history_store::query::plans_list(
+                conn,
+                project_owned.as_deref(),
+                since_owned.as_deref(),
+                limit,
+            )
+            .map_err(tokio_rusqlite::Error::from)
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Plans list query failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_plans_list(&results);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// `claude-history plans show <session-id>` — full plan markdown for a session.
+async fn run_plans_show(
+    conn: tokio_rusqlite::Connection,
+    session_id: String,
+    json: bool,
+) -> ExitCode {
+    let session_id_owned = session_id.clone();
+    let results = match conn
+        .call(move |conn| {
+            claude_history_store::query::plan_show(conn, &session_id_owned)
+                .map_err(tokio_rusqlite::Error::from)
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Plan show query failed: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if results.is_empty() {
+        eprintln!(
+            "No plan-bearing messages found for session: {}",
+            session_id
+        );
+        return ExitCode::FAILURE;
+    }
+
+    if json {
+        if output::print_json(&results).is_err() {
+            return ExitCode::FAILURE;
+        }
+    } else {
+        output::print_plan_show(&results);
+    }
+
+    ExitCode::SUCCESS
 }
 
 /// List rows from the `hook_executions` table (migration 008).

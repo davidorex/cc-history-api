@@ -260,12 +260,16 @@ impl DaemonClient {
 
     /// GET /v1/sessions — list sessions with optional filters.
     ///
-    /// Constructs query string from the provided optional parameters.
+    /// Constructs query string from the provided optional parameters. The
+    /// `has_plan` parameter (C2.4) is forwarded to the daemon as
+    /// `has_plan=true` / `has_plan=false`; the daemon's `SessionsParams`
+    /// deserializer accepts boolean strings via serde's standard handling.
     pub async fn sessions(
         &self,
         project: Option<&str>,
         after: Option<&str>,
         before: Option<&str>,
+        has_plan: Option<bool>,
         limit: Option<usize>,
     ) -> Result<Vec<SessionSummary>, DaemonError> {
         let mut params = Vec::new();
@@ -277,6 +281,9 @@ impl DaemonClient {
         }
         if let Some(b) = before {
             params.push(format!("before={}", urlencoded(b)));
+        }
+        if let Some(hp) = has_plan {
+            params.push(format!("has_plan={}", hp));
         }
         if let Some(l) = limit {
             params.push(format!("limit={}", l));

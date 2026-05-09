@@ -13,8 +13,8 @@ use chrono::{DateTime, Local, Utc};
 use claude_history_store::artifact_queries::{FileEntry, FileOperation, GitOperation, SessionArtifacts};
 use claude_history_store::fts::{SearchResult, SearchResultSource};
 use claude_history_store::query::{
-    AttachmentRow, HookExecutionRow, ModelStats, RecordTypeDriftEntry, SessionSummary, TokenStats,
-    ToolStats, VersionDriftGroup, VersionHistoryEntry,
+    AttachmentRow, HookExecutionRow, ModelStats, PlanFullRow, PlanRow, RecordTypeDriftEntry,
+    SessionSummary, TokenStats, ToolStats, VersionDriftGroup, VersionHistoryEntry,
 };
 
 /// Convert a UTC timestamp string to local time for display.
@@ -702,6 +702,94 @@ pub fn print_hook_executions(rows: &[HookExecutionRow]) {
             "{:>6}  {:<18}  {:<24}  {:>9}  {:>11}  {:<12}",
             r.id, event_truncated, tu_truncated, exit_display, duration_display, decision_truncated
         );
+    }
+}
+
+/// Print plan rows in a column-aligned table (C2.4).
+///
+/// Columns: SESSION (8 chars truncated), TIMESTAMP (local), PROJECT
+/// (40 chars rtrim), LEN (right-aligned bytes), PREVIEW (first ~50 chars
+/// of the markdown, with newlines collapsed to spaces so the table stays
+/// single-line). Full markdown body is omitted from the table; callers
+/// who need it should use `--json` or `plans show <session-id>`.
+pub fn print_plans_list(rows: &[PlanRow]) {
+    if rows.is_empty() {
+        println!("No plans found.");
+        return;
+    }
+
+    println!(
+        "{:<8}  {:<19}  {:<40}  {:>7}  {}",
+        "SESSION", "TIMESTAMP", "PROJECT", "LEN", "PREVIEW"
+    );
+    println!(
+        "{:<8}  {:<19}  {:<40}  {:>7}  {}",
+        "--------",
+        "-------------------",
+        "----------------------------------------",
+        "-------",
+        "----------------------------------------------------"
+    );
+
+    for r in rows {
+        let sid_short = if r.session_id.len() > 8 {
+            &r.session_id[..8]
+        } else {
+            &r.session_id
+        };
+        let project = r.project_path.as_deref().unwrap_or("-");
+        let project_display = if project.len() > 40 {
+            format!("...{}", &project[project.len() - 37..])
+        } else {
+            project.to_string()
+        };
+        // Collapse newlines / tabs to single spaces so table rows stay on
+        // one line. char_indices()-based truncation keeps this safe for
+        // the multibyte UTF-8 the markdown may contain.
+        let preview_oneline: String = r
+            .plan_content_preview
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+            .collect();
+        let preview_short = match preview_oneline.char_indices().nth(50) {
+            Some((idx, _)) => format!("{}...", &preview_oneline[..idx]),
+            None => preview_oneline.clone(),
+        };
+
+        println!(
+            "{:<8}  {:<19}  {:<40}  {:>7}  {}",
+            sid_short,
+            to_local(&r.timestamp),
+            project_display,
+            r.plan_content_length,
+            preview_short
+        );
+    }
+}
+
+/// Print full plan markdown bodies for a session (C2.4).
+///
+/// Each row gets a header block (session, project, message uuid,
+/// timestamp, length) followed by a `---` separator and the verbatim
+/// markdown body. Multiple plan-bearing messages render in chronological
+/// order matching `plan_show`'s SQL `ORDER BY timestamp ASC`.
+pub fn print_plan_show(rows: &[PlanFullRow]) {
+    for (i, r) in rows.iter().enumerate() {
+        if i > 0 {
+            println!();
+            println!("===");
+            println!();
+        }
+        println!("SESSION:    {}", r.session_id);
+        println!(
+            "PROJECT:    {}",
+            r.project_path.as_deref().unwrap_or("-")
+        );
+        println!("MESSAGE:    {}", r.message_uuid);
+        println!("TIMESTAMP:  {}", to_local(&r.timestamp));
+        println!("LENGTH:     {} bytes", r.plan_content.len());
+        println!("---");
+        println!("{}", r.plan_content);
     }
 }
 

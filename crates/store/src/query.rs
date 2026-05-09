@@ -156,6 +156,42 @@ pub struct HookExecutionRow {
     pub decision: Option<String>,
 }
 
+/// One row from the `plans list` CLI surface (C2.4).
+///
+/// Projects messages where `plan_content IS NOT NULL` for browsing user-typed
+/// plan markdown bodies. The `plan_content_preview` field holds the first
+/// ~200 chars of the underlying markdown so list view stays compact; the full
+/// body is fetched via `plans show <session-id>` (returns `PlanFullRow`).
+///
+/// Ordering: callers receive rows ordered by `timestamp DESC` (newest first).
+/// `plan_content_length` is a byte count of the source markdown — useful for
+/// surfacing oversize plans without paying the row-fetch cost on the full
+/// body.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlanRow {
+    pub session_id: String,
+    pub message_uuid: String,
+    pub project_path: Option<String>,
+    pub timestamp: String,
+    pub plan_content_length: i64,
+    pub plan_content_preview: String,
+}
+
+/// Full plan body row from `plans show <session-id>` (C2.4).
+///
+/// Returns one row per plan-bearing message in the session — a session can
+/// hold multiple plans across distinct user turns. The full markdown body
+/// is in `plan_content` verbatim (no length cap; callers render or truncate
+/// as appropriate).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlanFullRow {
+    pub session_id: String,
+    pub message_uuid: String,
+    pub project_path: Option<String>,
+    pub timestamp: String,
+    pub plan_content: String,
+}
+
 /// Detailed session information for the API `GET /sessions/:id` endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionDetail {
@@ -342,11 +378,21 @@ pub struct VersionDiffEntry {
 /// message count and primary model (first non-null model in the session).
 /// Project filter uses substring match (LIKE '%project%').
 /// Date filters compare against `sessions.first_seen_at`.
+///
+/// `has_plan` (C2.4): when `Some(true)`, narrows results to sessions holding
+/// at least one message with `plan_content IS NOT NULL`. The implementation
+/// uses an `EXISTS` subquery against `messages.plan_content` so the partial
+/// index `idx_messages_plan_content_present` (added by migration 010) is
+/// available to the planner. `Some(false)` filters to the inverse —
+/// sessions with no plan-bearing message — and is intended primarily for
+/// surface symmetry; it cannot use the partial index. `None` leaves the
+/// filter off entirely (legacy behavior preserved).
 pub fn list_sessions(
     conn: &Connection,
     project: Option<&str>,
     after: Option<&str>,
     before: Option<&str>,
+    has_plan: Option<bool>,
     limit: usize,
 ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
     let mut conditions = Vec::new();
@@ -366,6 +412,28 @@ pub fn list_sessions(
     if let Some(before) = before {
         conditions.push(format!("s.first_seen_at <= ?{}", param_values.len() + 1));
         param_values.push(Box::new(before.to_string()));
+    }
+    match has_plan {
+        Some(true) => {
+            // EXISTS-on-plan_content uses the partial index
+            // idx_messages_plan_content_present(session_id) WHERE
+            // plan_content IS NOT NULL. The predicate is constant in the
+            // SQL string (no user value bound), so this branch adds no
+            // params.
+            conditions.push(
+                "EXISTS (SELECT 1 FROM messages mp \
+                 WHERE mp.session_id = s.session_id AND mp.plan_content IS NOT NULL)"
+                    .to_string(),
+            );
+        }
+        Some(false) => {
+            conditions.push(
+                "NOT EXISTS (SELECT 1 FROM messages mp \
+                 WHERE mp.session_id = s.session_id AND mp.plan_content IS NOT NULL)"
+                    .to_string(),
+            );
+        }
+        None => {}
     }
 
     let where_clause = if conditions.is_empty() {
@@ -922,6 +990,111 @@ pub fn hook_executions_list(
             stderr: row.get(8)?,
             command: row.get(9)?,
             decision: row.get(10)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// List plan-bearing messages with optional filters (C2.4).
+///
+/// Returns rows from `messages` where `plan_content IS NOT NULL` joined to
+/// `sessions` for project context. Ordering is `timestamp DESC` (newest
+/// plans first). Filters:
+/// - `project`: substring match on `sessions.project_path` (LIKE
+///   '%project%'). Sessions with `NULL` project_path naturally drop out per
+///   SQL LIKE-on-NULL semantics — same precedent as `list_sessions` and
+///   `attachments_list`.
+/// - `since`: lower bound (inclusive) on `messages.timestamp`. ISO-8601 text
+///   compared lexicographically — the format the decomposer writes sorts
+///   correctly under string comparison.
+/// - `limit`: cap on rows returned.
+///
+/// `plan_content_preview` is the first ~200 chars of the markdown via
+/// `substr(plan_content, 1, 200)`. The full body is intentionally not
+/// returned in list view; callers wanting full markdown call `plan_show`.
+/// `plan_content_length` is `length(plan_content)` — byte-count of the text,
+/// not character count (acceptable for the surface contract: it is a sizing
+/// signal for callers, not an indexable metric).
+///
+/// All filters bind via parameterized SQL.
+pub fn plans_list(
+    conn: &Connection,
+    project: Option<&str>,
+    since: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PlanRow>, rusqlite::Error> {
+    let mut sql = String::from(
+        "SELECT m.session_id, m.uuid, s.project_path, m.timestamp,
+                length(m.plan_content) AS plan_len,
+                substr(m.plan_content, 1, 200) AS plan_preview
+         FROM messages m
+         LEFT JOIN sessions s ON s.session_id = m.session_id
+         WHERE m.plan_content IS NOT NULL",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(p) = project {
+        sql.push_str(" AND s.project_path LIKE ?");
+        params.push(Box::new(format!("%{}%", p)));
+    }
+
+    if let Some(s) = since {
+        sql.push_str(" AND m.timestamp >= ?");
+        params.push(Box::new(s.to_string()));
+    }
+
+    sql.push_str(" ORDER BY m.timestamp DESC LIMIT ?");
+    params.push(Box::new(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|b| b.as_ref()).collect();
+    let results = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(PlanRow {
+            session_id: row.get(0)?,
+            message_uuid: row.get(1)?,
+            project_path: row.get(2)?,
+            timestamp: row.get(3)?,
+            plan_content_length: row.get(4)?,
+            plan_content_preview: row.get(5)?,
+        })
+    })?;
+
+    results.collect()
+}
+
+/// Fetch all plan-bearing messages for a single session (C2.4).
+///
+/// Returns rows from `messages` where `session_id = ?` and `plan_content IS
+/// NOT NULL`, joined to `sessions` for project context. Ordered by
+/// `timestamp ASC` (oldest first) so multi-plan sessions render in
+/// chronological order — matches user expectation that successive plans in
+/// a session are shown in the order they were written.
+///
+/// Returns `Ok(vec![])` when the session exists but has no plan-bearing
+/// messages, and also when the session does not exist at all. Callers that
+/// need to distinguish "session not found" from "session has no plans"
+/// should query the sessions table separately.
+pub fn plan_show(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<PlanFullRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT m.session_id, m.uuid, s.project_path, m.timestamp, m.plan_content
+         FROM messages m
+         LEFT JOIN sessions s ON s.session_id = m.session_id
+         WHERE m.session_id = ? AND m.plan_content IS NOT NULL
+         ORDER BY m.timestamp ASC",
+    )?;
+
+    let results = stmt.query_map(rusqlite::params![session_id], |row| {
+        Ok(PlanFullRow {
+            session_id: row.get(0)?,
+            message_uuid: row.get(1)?,
+            project_path: row.get(2)?,
+            timestamp: row.get(3)?,
+            plan_content: row.get(4)?,
         })
     })?;
 
@@ -2268,5 +2441,219 @@ mod tests {
 
         let limited = hook_executions_list(&conn, None, None, None, 2).unwrap();
         assert_eq!(limited.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // plans_list / plan_show / list_sessions has_plan filter — C2.4
+    //
+    // Exercises the parameterized SQL paths for the new CLI plans surface.
+    // Uses setup_db() (which runs migrations through 011) so the
+    // `messages.plan_content` column and the
+    // `idx_messages_plan_content_present` partial index are present.
+    // -----------------------------------------------------------------------
+
+    /// Insert a message row with optional plan_content.
+    ///
+    /// `type_` defaults to "user" since plan_content originates only from
+    /// user records per migration 010's backfill path. Other columns are
+    /// `NULL` to keep the helper minimal — callers that need richer data
+    /// should use the existing `seed_messages_for_drift` helper or extend
+    /// this one as needed.
+    fn seed_message_with_plan(
+        conn: &Connection,
+        uuid: &str,
+        session_id: &str,
+        timestamp: &str,
+        plan_content: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp, plan_content)
+             VALUES (?1, ?2, 'user', ?3, ?4)",
+            rusqlite::params![uuid, session_id, timestamp, plan_content],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_plans_list_no_filters_orders_by_timestamp_desc() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        seed_message_with_plan(&conn, "m-a", "s-1", "2026-05-01T00:00:00Z", Some("# Plan A"));
+        seed_message_with_plan(&conn, "m-b", "s-1", "2026-05-03T00:00:00Z", Some("# Plan B"));
+        seed_message_with_plan(&conn, "m-c", "s-1", "2026-05-02T00:00:00Z", Some("# Plan C"));
+        // A plain message with no plan_content should not appear.
+        seed_message_with_plan(&conn, "m-d", "s-1", "2026-05-04T00:00:00Z", None);
+
+        let rows = plans_list(&conn, None, None, 50).unwrap();
+        assert_eq!(rows.len(), 3, "only plan-bearing messages returned");
+        assert_eq!(rows[0].message_uuid, "m-b", "newest first");
+        assert_eq!(rows[1].message_uuid, "m-c");
+        assert_eq!(rows[2].message_uuid, "m-a");
+    }
+
+    #[test]
+    fn test_plans_list_project_substring_filter() {
+        let conn = setup_db();
+        seed_session(&conn, "s-alpha", Some("/Users/dev/Projects/alpha"));
+        seed_session(&conn, "s-beta", Some("/Users/dev/Projects/beta"));
+        seed_message_with_plan(
+            &conn,
+            "m-a",
+            "s-alpha",
+            "2026-05-01T00:00:00Z",
+            Some("# Plan alpha"),
+        );
+        seed_message_with_plan(
+            &conn,
+            "m-b",
+            "s-beta",
+            "2026-05-02T00:00:00Z",
+            Some("# Plan beta"),
+        );
+
+        let rows = plans_list(&conn, Some("alpha"), None, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_uuid, "m-a");
+        assert_eq!(
+            rows[0].project_path.as_deref(),
+            Some("/Users/dev/Projects/alpha")
+        );
+    }
+
+    #[test]
+    fn test_plans_list_since_and_limit() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        seed_message_with_plan(&conn, "m-a", "s-1", "2026-04-01T00:00:00Z", Some("a"));
+        seed_message_with_plan(&conn, "m-b", "s-1", "2026-05-01T00:00:00Z", Some("b"));
+        seed_message_with_plan(&conn, "m-c", "s-1", "2026-06-01T00:00:00Z", Some("c"));
+
+        let rows = plans_list(&conn, None, Some("2026-04-15T00:00:00Z"), 50).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].message_uuid, "m-c");
+        assert_eq!(rows[1].message_uuid, "m-b");
+
+        let limited = plans_list(&conn, None, None, 1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].message_uuid, "m-c");
+    }
+
+    #[test]
+    fn test_plans_list_preview_and_length() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        let big = "x".repeat(500);
+        seed_message_with_plan(&conn, "m-a", "s-1", "2026-05-01T00:00:00Z", Some(&big));
+
+        let rows = plans_list(&conn, None, None, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        // length() in SQLite returns char count for TEXT (matches len() on
+        // pure-ASCII Rust strings); 500 'x' bytes = 500 chars either way.
+        assert_eq!(rows[0].plan_content_length, 500);
+        // substr(.., 1, 200) returns the first 200 chars.
+        assert_eq!(rows[0].plan_content_preview.len(), 200);
+    }
+
+    #[test]
+    fn test_plan_show_returns_full_content_in_chronological_order() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        // Insert in non-chronological order to verify ORDER BY timestamp ASC.
+        seed_message_with_plan(
+            &conn,
+            "m-late",
+            "s-1",
+            "2026-05-03T00:00:00Z",
+            Some("# Late plan"),
+        );
+        seed_message_with_plan(
+            &conn,
+            "m-early",
+            "s-1",
+            "2026-05-01T00:00:00Z",
+            Some("# Early plan"),
+        );
+
+        let rows = plan_show(&conn, "s-1").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].message_uuid, "m-early", "earliest first");
+        assert_eq!(rows[0].plan_content, "# Early plan");
+        assert_eq!(rows[1].message_uuid, "m-late");
+        assert_eq!(rows[1].plan_content, "# Late plan");
+    }
+
+    #[test]
+    fn test_plan_show_unknown_session_returns_empty() {
+        let conn = setup_db();
+        let rows = plan_show(&conn, "does-not-exist").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_plan_show_session_with_no_plans_returns_empty() {
+        let conn = setup_db();
+        seed_session(&conn, "s-1", Some("/Users/dev/Projects/alpha"));
+        seed_message_with_plan(&conn, "m-a", "s-1", "2026-05-01T00:00:00Z", None);
+
+        let rows = plan_show(&conn, "s-1").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_list_sessions_has_plan_filter_true_narrows_results() {
+        let conn = setup_db();
+        seed_session(&conn, "s-with-plan", Some("/Users/dev/Projects/alpha"));
+        seed_session(&conn, "s-without-plan", Some("/Users/dev/Projects/alpha"));
+        seed_message_with_plan(
+            &conn,
+            "m-a",
+            "s-with-plan",
+            "2026-05-01T00:00:00Z",
+            Some("# yes"),
+        );
+        seed_message_with_plan(
+            &conn,
+            "m-b",
+            "s-without-plan",
+            "2026-05-01T00:00:00Z",
+            None,
+        );
+
+        let with = list_sessions(&conn, None, None, None, Some(true), 50).unwrap();
+        assert_eq!(with.len(), 1);
+        assert_eq!(with[0].session_id, "s-with-plan");
+
+        let without = list_sessions(&conn, None, None, None, Some(false), 50).unwrap();
+        assert_eq!(without.len(), 1);
+        assert_eq!(without[0].session_id, "s-without-plan");
+
+        let none_filter = list_sessions(&conn, None, None, None, None, 50).unwrap();
+        assert_eq!(none_filter.len(), 2);
+    }
+
+    #[test]
+    fn test_list_sessions_has_plan_combines_with_project_filter() {
+        let conn = setup_db();
+        seed_session(&conn, "s-alpha-plan", Some("/Users/dev/Projects/alpha"));
+        seed_session(&conn, "s-beta-plan", Some("/Users/dev/Projects/beta"));
+        seed_message_with_plan(
+            &conn,
+            "m-a",
+            "s-alpha-plan",
+            "2026-05-01T00:00:00Z",
+            Some("# alpha plan"),
+        );
+        seed_message_with_plan(
+            &conn,
+            "m-b",
+            "s-beta-plan",
+            "2026-05-01T00:00:00Z",
+            Some("# beta plan"),
+        );
+
+        let alpha_with_plan =
+            list_sessions(&conn, Some("alpha"), None, None, Some(true), 50).unwrap();
+        assert_eq!(alpha_with_plan.len(), 1);
+        assert_eq!(alpha_with_plan[0].session_id, "s-alpha-plan");
     }
 }

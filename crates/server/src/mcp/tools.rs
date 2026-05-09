@@ -239,6 +239,7 @@ impl McpService {
                     project.as_deref(),
                     after.as_deref(),
                     before.as_deref(),
+                    None,
                     limit,
                 )
             })
