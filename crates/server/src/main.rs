@@ -561,7 +561,7 @@ const EXPORT_HELP: &str = r#"EXAMPLES:
 const MCP_STDIO_HELP: &str = r#"Runs claude-history as an MCP (Model Context Protocol) server communicating
 over stdin/stdout. This is how Claude Desktop and Claude Code connect.
 
-15 TOOLS AVAILABLE:
+17 TOOLS AVAILABLE:
 
   Discovery:
     list_sessions       Browse sessions by project, date range
@@ -569,6 +569,7 @@ over stdin/stdout. This is how Claude Desktop and Claude Code connect.
     list_queries        Discover available canned SQL queries
     list_bookmarks      Browse bookmarks from ClaudeHistoryBrowser
     list_attachments    List attachment rows with project/inner_type/since filters
+    list_plans          List plan-mode markdown docs (project/since/limit filters)
     get_stats           Token usage, tool frequency, model breakdown
 
   Deep queries:
@@ -579,6 +580,7 @@ over stdin/stdout. This is how Claude Desktop and Claude Code connect.
     get_bookmark        Retrieve a bookmark by ID or assistant message UUID
     search_bookmarks    Search bookmarks by label or tag text
     get_hook_executions List hook_executions rows by tool_use_id/hook_event/exit_code
+    get_plan            Full plan-mode markdown body(ies) for a session
 
   Power tools:
     execute_sql         Read-only SQL passthrough (any SELECT query)
@@ -644,7 +646,7 @@ DISCOVERY WORKFLOW:
   8. Export a session:
        claude-history export <session-id> --format markdown
 
-MCP TOOLS (15):
+MCP TOOLS (17):
 
   The same data is available via MCP for LLM tool use. Connect via:
     - Streamable HTTP: http://127.0.0.1:7424/mcp (when daemon is running)

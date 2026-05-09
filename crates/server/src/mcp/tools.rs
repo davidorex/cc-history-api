@@ -161,6 +161,24 @@ pub struct GetHookExecutionsParams {
     pub limit: Option<usize>,
 }
 
+/// Parameters for the `list_plans` MCP tool (C2.5).
+#[derive(Deserialize, JsonSchema)]
+pub struct ListPlansParams {
+    /// Filter by project path (substring match against sessions.project_path)
+    pub project: Option<String>,
+    /// Lower bound on messages.timestamp (ISO-8601 text)
+    pub since: Option<String>,
+    /// Maximum rows to return (default 50)
+    pub limit: Option<u32>,
+}
+
+/// Parameters for the `get_plan` MCP tool (C2.5).
+#[derive(Deserialize, JsonSchema)]
+pub struct GetPlanParams {
+    /// Session ID whose plan-bearing messages should be returned
+    pub session_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // McpService
 // ---------------------------------------------------------------------------
@@ -567,5 +585,44 @@ impl McpService {
                 "No bookmark found matching the given criteria.",
             )])),
         }
+    }
+
+    #[tool(description = "List plan-mode markdown documents extracted from user.planContent (migration 010). Filters: project (substring match against sessions.project_path), since (ISO-8601 timestamp lower bound on messages.timestamp), limit (default 50). Returns rows ordered by timestamp DESC with session_id, message_uuid, project_path, timestamp, plan_content_length (char count of full markdown), and plan_content_preview (first ~200 chars). Call get_plan with a session_id to fetch the full plan body.")]
+    async fn list_plans(
+        &self,
+        Parameters(params): Parameters<ListPlansParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = params.limit.unwrap_or(50) as usize;
+        let project = params.project;
+        let since = params.since;
+        let results = self
+            .state
+            .conn
+            .call(move |conn| {
+                claude_history_store::query::plans_list(
+                    conn,
+                    project.as_deref(),
+                    since.as_deref(),
+                    limit,
+                )
+            })
+            .await
+            .map_err(db_error)?;
+        json_result(&results)
+    }
+
+    #[tool(description = "Fetch full plan-mode markdown bodies for every plan-bearing message in a session. A session can hold multiple plans across distinct user turns; rows are returned in chronological order (timestamp ASC). Returns an empty array when the session has no plan_content rows or does not exist. Each row carries session_id, message_uuid, project_path, timestamp, and the full plan_content text (no length cap).")]
+    async fn get_plan(
+        &self,
+        Parameters(params): Parameters<GetPlanParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let session_id = params.session_id;
+        let results = self
+            .state
+            .conn
+            .call(move |conn| claude_history_store::query::plan_show(conn, &session_id))
+            .await
+            .map_err(db_error)?;
+        json_result(&results)
     }
 }
