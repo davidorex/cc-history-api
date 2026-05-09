@@ -630,7 +630,14 @@ mod tests {
         // runner's schema_versions guard), seed a row, then apply 010's
         // SQL directly.
         let conn = Connection::open_in_memory().unwrap();
-        for (_version, sql) in MIGRATIONS.iter().take(9) {
+        // Predicate-based slice rather than .take(9): if a future migration
+        // is inserted at position <010, .take(9) would silently apply the
+        // wrong subset. take_while compares the version string lexically,
+        // which is correct for the zero-padded "001".."010" naming scheme
+        // and stays correct as new pre-010 migrations would be impossible
+        // (010 is already shipped) — the predicate documents the boundary.
+        // [C2.1.1 / audit #45]
+        for (_version, sql) in MIGRATIONS.iter().take_while(|(v, _)| *v < "010") {
             conn.execute_batch(sql).unwrap();
         }
 

@@ -429,11 +429,19 @@ fn decompose_user(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Build extra_json from remaining overflow (excluding promoted keys)
+    // Build extra_json from remaining overflow (excluding promoted keys).
+    // planContent removal is conditional on string-extraction success: if a
+    // future Claude Code version emits planContent as a non-string Value
+    // (object/number/array), `as_str()` above returns None and plan_content
+    // stays NULL. In that case we deliberately preserve the original Value
+    // in extra_json so it remains queryable via json_extract for forensic
+    // recovery rather than being silently dropped. [C2.1.1 / audit #25,#39,#40]
     let mut remaining = r.overflow.clone();
     remaining.remove("isCompactSummary");
     remaining.remove("sourceToolUseID");
-    remaining.remove("planContent");
+    if plan_content.is_some() {
+        remaining.remove("planContent");
+    }
     let extra_json = if remaining.is_empty() {
         None
     } else {
@@ -2335,6 +2343,83 @@ mod tests {
         assert!(
             extra_json.is_none(),
             "extra_json should be NULL when only-overflow key was promoted; got {extra_json:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17b' (C2.1.1): User record with a NON-string planContent Value
+    //          (e.g., an object) -> plan_content column NULL AND the
+    //          original Value preserved in extra_json. Regression for
+    //          audit rows #25/#39/#40: prior code unconditionally removed
+    //          "planContent" from the remaining-overflow map even when
+    //          string extraction failed via as_str(), losing the Value
+    //          entirely. C2.1.1 makes the remove() conditional on
+    //          extraction success so non-string Values stay queryable
+    //          via json_extract(extra_json, '$.planContent').
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_preserves_non_string_plan_content() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        // Non-string Value: an object. as_str() returns None, so
+        // plan_content extraction yields None and the Value should remain
+        // in extra_json for forensic recovery.
+        let mut overflow = HashMap::new();
+        overflow.insert(
+            "planContent".to_string(),
+            serde_json::json!({"unexpected": "object", "n": 1}),
+        );
+
+        let record = UserRecord {
+            base: test_base("user-plan-nonstr", "sess-plan-nonstr"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("non-string planContent record".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow,
+        };
+
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        // plan_content column should be NULL because as_str() returned None
+        // for the object Value.
+        let plan_content: Option<String> = conn
+            .query_row(
+                "SELECT plan_content FROM messages WHERE uuid = 'user-plan-nonstr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            plan_content.is_none(),
+            "plan_content should be NULL when planContent Value is non-string; got {plan_content:?}"
+        );
+
+        // The original non-string Value should still be present in extra_json
+        // (NOT removed). This guards against the audit-flagged data-loss
+        // path where unconditional remove() stripped the Value.
+        let extra_json: Option<String> = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'user-plan-nonstr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let extra_json = extra_json.expect(
+            "extra_json should be Some when a non-string planContent Value is preserved",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&extra_json).unwrap();
+        assert_eq!(
+            parsed.get("planContent"),
+            Some(&serde_json::json!({"unexpected": "object", "n": 1})),
+            "non-string planContent Value should be preserved verbatim in extra_json; got {parsed}"
         );
     }
 
