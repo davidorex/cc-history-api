@@ -419,13 +419,23 @@ async fn check_version_change(
                 // does not prevent event delivery.
                 let ver = new_version.clone();
                 let sid = session_id.to_string();
+                // D3: re-derive session_count from the sessions table on every
+                // upsert rather than incrementing by 1 per version-change event.
+                // The backfill paths (D1's sync_all backfill and the watcher's
+                // gated startup backfill above) already source session_count as
+                // COUNT(*) FROM sessions GROUP BY version. Aligning the live
+                // ON CONFLICT path with that pattern aims to give every row in
+                // version_history a consistent semantic — distinct sessions per
+                // version per the sessions table at upsert time — rather than a
+                // mix of "distinct count" (backfilled rows) and "version-change
+                // event count" (rows ever updated by this live path).
                 let persist_result = conn.call(move |conn| {
                     conn.execute(
                         "INSERT INTO version_history (version, first_seen_at, last_seen_at, session_id, session_count)
                          VALUES (?1, datetime('now'), datetime('now'), ?2, 1)
                          ON CONFLICT(version) DO UPDATE SET
                            last_seen_at = datetime('now'),
-                           session_count = version_history.session_count + 1",
+                           session_count = (SELECT COUNT(*) FROM sessions WHERE version = ?1)",
                         rusqlite::params![ver, sid],
                     )
                 }).await;
@@ -853,6 +863,95 @@ mod tests {
         // task handle so the test does not leak a spawned task.
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        // Best-effort cleanup of the on-disk DB file.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// D3 regression test: when `check_version_change` upserts into
+    /// version_history via the ON CONFLICT path, the resulting `session_count`
+    /// must reflect `COUNT(*) FROM sessions WHERE version = ?` rather than the
+    /// pre-D3 `version_history.session_count + 1`. We seed two sessions at the
+    /// same version, plant a stale version_history row with `session_count = 0`
+    /// to make the divergence observable, and call `check_version_change` to
+    /// trigger the upsert. Pre-D3 the post-call value would be 1 (stale 0 + 1).
+    /// Post-D3 it is 2 (the truth from sessions). Asserting equality with 2
+    /// pins the intended re-derive semantic.
+    ///
+    /// The test does not exercise watcher_loop or any spawned task — it calls
+    /// `check_version_change` directly with a freshly built `WatcherState`,
+    /// avoiding the gated-backfill code path entirely. A `CancellationToken` is
+    /// not required because no task is spawned.
+    #[tokio::test]
+    async fn check_version_change_session_count_re_derives_from_sessions_truth() {
+        // PID-scoped temp DB with full migrations applied.
+        let tmp_dir = std::env::temp_dir().join("claude-history-watcher-d3-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let db_path = tmp_dir.join(format!("d3-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = claude_history_store::db::init_db(&db_path)
+            .await
+            .expect("init_db should succeed for D3 test");
+
+        // Seed: two distinct sessions at the same version. This is the "truth"
+        // that the D3 SQL aims to surface into version_history.session_count.
+        conn.call(|c| {
+            c.execute_batch(
+                "INSERT INTO sessions (session_id, project_path, first_seen_at, version)
+                 VALUES ('d3-session-a', '/tmp/d3', datetime('now'), '2.1.99');
+                 INSERT INTO sessions (session_id, project_path, first_seen_at, version)
+                 VALUES ('d3-session-b', '/tmp/d3', datetime('now'), '2.1.99');",
+            )
+            .map_err(tokio_rusqlite::Error::from)
+        })
+        .await
+        .expect("seed two sessions at version 2.1.99");
+
+        // Plant a stale version_history row with session_count = 0. The pre-D3
+        // path would compute `0 + 1 = 1` on conflict; the D3 path re-derives
+        // from sessions and yields 2.
+        conn.call(|c| {
+            c.execute(
+                "INSERT INTO version_history (version, first_seen_at, last_seen_at, session_id, session_count)
+                 VALUES ('2.1.99', datetime('now'), datetime('now'), 'd3-session-a', 0)",
+                [],
+            )
+        })
+        .await
+        .expect("plant stale version_history row with session_count = 0");
+
+        // Build a WatcherState whose last_known_version differs from the
+        // session's version, so check_version_change takes the "changed"
+        // branch and reaches the ON CONFLICT upsert.
+        let mut state = WatcherState {
+            debouncer: FileDebouncer::new(2),
+            last_known_version: Some("2.1.0-prior".to_string()),
+            data_ingested_since_fts_rebuild: false,
+            last_fts_rebuild: Instant::now(),
+        };
+        let (event_tx, _event_rx) = broadcast::channel::<SseEvent>(16);
+
+        check_version_change(&mut state, &conn, "d3-session-a", &event_tx).await;
+
+        // Assert the upsert re-derived session_count from the sessions table.
+        let observed_count: i64 = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT session_count FROM version_history WHERE version = '2.1.99'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("read back session_count for version 2.1.99");
+
+        assert_eq!(
+            observed_count, 2,
+            "post-D3, session_count must re-derive from COUNT(*) FROM sessions \
+             (truth = 2 sessions at version 2.1.99); pre-D3 it would have been \
+             1 (stale 0 + 1 increment)"
+        );
 
         // Best-effort cleanup of the on-disk DB file.
         let _ = std::fs::remove_file(&db_path);
