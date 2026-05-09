@@ -1036,7 +1036,13 @@ async fn run_search(
             let q = query.clone();
             match conn
                 .call(move |conn| {
-                    claude_history_store::fts::search_messages(conn, &q, limit, 0)
+                    // C1.3: union FTS over message content AND attachment
+                    // textual content. Pre-C1.3 callers see the same
+                    // SearchResult shape — `source` defaults to Message
+                    // for message-content matches.
+                    claude_history_store::fts::search_messages_and_attachments(
+                        conn, &q, limit, 0,
+                    )
                 })
                 .await
             {

@@ -56,7 +56,13 @@ pub async fn search(
     let results = state
         .conn
         .call(move |conn| {
-            claude_history_store::fts::search_messages(conn, &params.q, limit, offset)
+            // C1.3: union FTS over message content AND attachment text.
+            // The SearchResult shape carries a `source` discriminator;
+            // older REST clients keyed off existing fields continue to
+            // parse without modification (the new field is additive).
+            claude_history_store::fts::search_messages_and_attachments(
+                conn, &params.q, limit, offset,
+            )
         })
         .await?;
 

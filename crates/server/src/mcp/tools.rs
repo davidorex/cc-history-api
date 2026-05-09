@@ -170,7 +170,7 @@ fn db_error(e: impl std::fmt::Display) -> McpError {
 
 #[tool_router]
 impl McpService {
-    #[tool(description = "Search message content using FTS5 full-text search. Supports AND, OR, NOT, \"phrase match\", and prefix* syntax. Results ranked by bm25 relevance.")]
+    #[tool(description = "Search message content AND attachment textual content (mcp_instructions_delta added blocks, skill_listing content, edited_text_file snippets, nested_memory content) using FTS5. Each result carries a `source` discriminator: `{kind: \"message\"}` or `{kind: \"attachment\", subtype: \"<inner_type>\"}`. Supports AND, OR, NOT, \"phrase match\", and prefix* syntax. Results ranked by bm25 relevance.")]
     async fn search_messages(
         &self,
         Parameters(params): Parameters<SearchParams>,
@@ -181,7 +181,13 @@ impl McpService {
             .state
             .conn
             .call(move |conn| {
-                claude_history_store::fts::search_messages(conn, &query, limit, 0)
+                // C1.3: union FTS over message and attachment text. The
+                // pre-C1.3 search_messages call site is preserved through
+                // the same tool name; the result shape gains a `source`
+                // field defaulted to message for legacy parity.
+                claude_history_store::fts::search_messages_and_attachments(
+                    conn, &query, limit, 0,
+                )
             })
             .await
             .map_err(db_error)?;

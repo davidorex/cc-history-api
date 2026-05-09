@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, Local, Utc};
 use claude_history_store::artifact_queries::{FileEntry, FileOperation, GitOperation, SessionArtifacts};
-use claude_history_store::fts::SearchResult;
+use claude_history_store::fts::{SearchResult, SearchResultSource};
 use claude_history_store::query::{
     ModelStats, RecordTypeDriftEntry, SessionSummary, TokenStats, ToolStats, VersionDriftGroup,
     VersionHistoryEntry,
@@ -37,6 +37,11 @@ fn to_local(utc_str: &str) -> String {
 /// Each result shows session_id (truncated to 8 chars), timestamp, message_type,
 /// block_type, and the FTS5 snippet with >>> <<< markers displayed as-is.
 /// Results are separated by `---` dividers.
+///
+/// Source label (C1.3): when a result's `source` is
+/// `SearchResultSource::Attachment`, the line is prefixed with `[attachment]`
+/// to distinguish it visually from the pre-C1.3 message-content rows. Message
+/// rows render unchanged for backwards-compatible terminal output.
 pub fn print_search_results(results: &[SearchResult]) {
     if results.is_empty() {
         println!("No results found.");
@@ -52,9 +57,17 @@ pub fn print_search_results(results: &[SearchResult]) {
         } else {
             &r.session_id
         };
+        let source_tag = match &r.source {
+            SearchResultSource::Message => String::new(),
+            SearchResultSource::Attachment(_) => "[attachment] ".to_string(),
+        };
         println!(
-            "{} | {} | {} | {}",
-            sid_short, to_local(&r.timestamp), r.message_type, r.block_type
+            "{}{} | {} | {} | {}",
+            source_tag,
+            sid_short,
+            to_local(&r.timestamp),
+            r.message_type,
+            r.block_type
         );
         println!("  {}", r.snippet);
     }

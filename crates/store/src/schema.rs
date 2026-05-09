@@ -17,6 +17,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("006", include_str!("../migrations/006_version_monitoring.sql")),
     ("007", include_str!("../migrations/007_record_type_drift.sql")),
     ("008", include_str!("../migrations/008_attachments.sql")),
+    ("009", include_str!("../migrations/009_attachment_fts.sql")),
 ];
 
 /// Errors that can occur during migration application.
@@ -269,10 +270,10 @@ mod tests {
             .unwrap();
         // version_history is empty on a fresh in-memory DB (no sessions to backfill from)
         assert_eq!(vh_count, 0, "version_history should be empty on fresh DB");
-        // schema_versions should have 8 entries (one per migration after C1.1)
+        // schema_versions should have 9 entries (one per migration after C1.3)
         assert_eq!(
-            sv_count, 8,
-            "schema_versions should track all 8 applied migrations"
+            sv_count, 9,
+            "schema_versions should track all 9 applied migrations"
         );
     }
 
@@ -482,7 +483,7 @@ mod tests {
         let sv_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(sv_count, 8, "all 8 migrations should be recorded post-008");
+        assert_eq!(sv_count, 9, "all 9 migrations should be recorded post-009");
 
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -491,5 +492,59 @@ mod tests {
             integrity, "ok",
             "PRAGMA integrity_check should return 'ok' after all migrations"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration 009: fts_attachment_text_content FTS5 virtual table for
+    // textual payloads from four AttachmentBody subtypes (C1.3).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_009_creates_fts_attachment_text_content_table() {
+        let conn = migrated_conn();
+        // FTS5 virtual tables register themselves in sqlite_master with
+        // type='table' and an "USING fts5(...)" sql expression.
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'fts_attachment_text_content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            exists,
+            "fts_attachment_text_content virtual table should exist after migration 009"
+        );
+    }
+
+    #[test]
+    fn migration_009_columns_queryable() {
+        let conn = migrated_conn();
+        // The 4 columns: attachment_uuid, session_id, inner_type, text_content.
+        // FTS5 selectability is the operational test that the schema is intact.
+        conn.execute_batch(
+            "SELECT attachment_uuid, session_id, inner_type, text_content
+             FROM fts_attachment_text_content LIMIT 0",
+        )
+        .expect(
+            "fts_attachment_text_content should have all expected columns after migration 009",
+        );
+    }
+
+    #[test]
+    fn migration_009_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = '009'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "migration 009 should be recorded exactly once");
     }
 }

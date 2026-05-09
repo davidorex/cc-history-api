@@ -721,7 +721,10 @@ pub async fn watcher_loop(
             }
 
             // Branch (c): periodic FTS rebuild check (every 30 seconds)
-            // Rebuilds both message content and file operations FTS5 indexes.
+            // Rebuilds three FTS5 indexes — message content, file operations,
+            // and (added in C1.3) attachment textual content. All three share
+            // the same 30s cadence and the same data_ingested_since_fts_rebuild
+            // gate so a no-op tick costs nothing.
             _ = tokio::time::sleep(Duration::from_secs(30)) => {
                 if state.data_ingested_since_fts_rebuild
                     && state.last_fts_rebuild.elapsed() >= Duration::from_secs(30)
@@ -730,12 +733,15 @@ pub async fn watcher_loop(
                         .call(|conn| -> Result<(), rusqlite::Error> {
                             claude_history_store::fts::rebuild_fts_index(conn)?;
                             claude_history_store::fts::rebuild_fts_file_operations(conn)?;
+                            claude_history_store::fts::rebuild_fts_attachment_text_content(conn)?;
                             Ok(())
                         })
                         .await
                     {
                         Ok(()) => {
-                            tracing::info!("Periodic FTS rebuild complete (message content + file operations)");
+                            tracing::info!(
+                                "Periodic FTS rebuild complete (message content + file operations + attachment text)"
+                            );
                         }
                         Err(e) => {
                             tracing::warn!(
