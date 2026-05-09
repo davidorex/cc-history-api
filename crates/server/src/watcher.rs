@@ -479,6 +479,7 @@ pub async fn watcher_loop(
     conn: tokio_rusqlite::Connection,
     event_tx: broadcast::Sender<SseEvent>,
     cancel: CancellationToken,
+    sync_all_done: tokio::sync::oneshot::Receiver<()>,
 ) {
     // Initialize last_known_version from the database. This sets a baseline from
     // existing data so version:changed events only fire when the version genuinely
@@ -505,6 +506,32 @@ pub async fn watcher_loop(
         data_ingested_since_fts_rebuild: false,
         last_fts_rebuild: Instant::now(),
     };
+
+    // Cold-boot ordering: wait for sync_all (spawned in serve.rs) to finish before
+    // running the startup version_history backfill. Without this gate, the backfill
+    // here can race against sync_all's writes to the sessions table and miss
+    // newer-version rows that sync_all is still in the process of inserting.
+    //
+    // Only this one-shot startup backfill query is gated. The select! loop below
+    // (live filesystem events and cancellation) is intentionally NOT gated, so the
+    // watcher remains responsive to live ingestion events that arrive concurrently
+    // with the catch-up sync_all.
+    //
+    // If the sender is dropped without firing (would happen if the sync_all task
+    // panicked before its send line, or if spawn_watcher failed and serve.rs never
+    // wired the sender), fall through to running the backfill best-effort and emit
+    // a warning so the lost-signal case is visible in logs.
+    match sync_all_done.await {
+        Ok(()) => {
+            tracing::debug!("Watcher received sync_all completion signal, running startup backfill");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "sync_all completion signal lost (sender dropped without firing) — \
+                 running startup version_history backfill best-effort"
+            );
+        }
+    }
 
     // Backfill version_history from sessions table on startup.
     // This aims to ensure version_history is populated even if the migration's
@@ -712,5 +739,122 @@ pub async fn watcher_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    /// D2 regression test: the watcher's startup version_history backfill must not
+    /// run until the sync_all completion oneshot fires. We seed the sessions table
+    /// AFTER spawning watcher_loop but BEFORE firing the oneshot, then assert that
+    /// version_history is observed populated only after we send the signal.
+    ///
+    /// The test does not exercise the live filesystem-event branch — it only
+    /// verifies the ordering of the one-shot startup backfill query against the
+    /// completion signal. The cancellation token at the end winds the loop down
+    /// cleanly so the test does not leak a spawned task.
+    #[tokio::test]
+    async fn watcher_startup_backfill_waits_for_sync_all_signal() {
+        // Set up an in-process SQLite database with full migrations applied so
+        // the version_history table and its constraints are present.
+        let tmp_dir = std::env::temp_dir().join("claude-history-watcher-d2-test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let db_path = tmp_dir.join(format!("d2-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = claude_history_store::db::init_db(&db_path)
+            .await
+            .expect("init_db should succeed for D2 test");
+
+        // Channels mirroring the real serve.rs wiring.
+        let (_watch_tx, watch_rx) =
+            mpsc::channel::<notify::Result<notify::Event>>(16);
+        let (event_tx, _event_rx) = broadcast::channel::<SseEvent>(16);
+        let (sync_done_tx, sync_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel = CancellationToken::new();
+
+        // Spawn watcher_loop. With the D2 sequencing in place, the loop awaits
+        // sync_done_rx before issuing the startup backfill query.
+        let loop_conn = conn.clone();
+        let loop_cancel = cancel.clone();
+        let loop_handle = tokio::spawn(async move {
+            watcher_loop(watch_rx, loop_conn, event_tx, loop_cancel, sync_done_rx).await;
+        });
+
+        // Insert a sessions row AFTER spawning the watcher_loop but BEFORE firing
+        // the completion signal. If the watcher's backfill ran without waiting on
+        // the signal, it could observe an empty sessions table here and produce
+        // an empty version_history.
+        conn.call(|c| {
+            c.execute(
+                "INSERT INTO sessions (session_id, project_path, first_seen_at, version)
+                 VALUES ('d2-test-session', '/tmp/d2', datetime('now'), '2.0.0-d2-test')",
+                [],
+            )
+        })
+        .await
+        .expect("insert seeded session row");
+
+        // Confirm version_history is empty before we fire the signal. A small
+        // sleep gives any erroneously-ungated backfill a chance to run; the
+        // assertion below would catch a race in either direction.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let pre_signal_count: i64 = conn
+            .call(|c| c.query_row("SELECT COUNT(*) FROM version_history", [], |row| row.get(0)))
+            .await
+            .expect("count version_history pre-signal");
+        assert_eq!(
+            pre_signal_count, 0,
+            "version_history should be empty before sync_all completion signal fires"
+        );
+
+        // Capture timestamp before firing the oneshot.
+        let t_signal = SystemTime::now();
+
+        // Fire the signal — watcher_loop's startup backfill is now allowed to run.
+        sync_done_tx
+            .send(())
+            .expect("send on sync_done channel should succeed");
+
+        // Poll version_history until non-empty, with a 1-second timeout.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut observed_count: i64 = 0;
+        let mut t_observed: Option<SystemTime> = None;
+        while std::time::Instant::now() < deadline {
+            observed_count = conn
+                .call(|c| {
+                    c.query_row("SELECT COUNT(*) FROM version_history", [], |row| row.get(0))
+                })
+                .await
+                .expect("count version_history during poll");
+            if observed_count > 0 {
+                t_observed = Some(SystemTime::now());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            observed_count > 0,
+            "watcher startup backfill should populate version_history within 1s after signal fires"
+        );
+        let t_observed = t_observed.expect("observed timestamp recorded when count went positive");
+        assert!(
+            t_observed >= t_signal,
+            "backfill observation timestamp ({:?}) should not precede signal-fire timestamp ({:?})",
+            t_observed,
+            t_signal
+        );
+
+        // Wind the watcher_loop down cleanly via cancellation, then await the
+        // task handle so the test does not leak a spawned task.
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        // Best-effort cleanup of the on-disk DB file.
+        let _ = std::fs::remove_file(&db_path);
     }
 }

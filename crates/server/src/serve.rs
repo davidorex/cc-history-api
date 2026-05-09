@@ -86,10 +86,30 @@ pub async fn run_server(
     // warnings) rather than stalling the FSEvents callback thread.
     let (watch_tx, watch_rx) = tokio::sync::mpsc::channel(4096);
 
+    // --- Cold-boot ordering signal between sync_all and watcher startup backfill ---
+    // The watcher_loop's startup version_history backfill (in watcher.rs) and the
+    // sync_all task spawned below both touch the version_history table. If the
+    // watcher's startup backfill ran before sync_all finished writing newer-version
+    // sessions, those versions would be missed by that boot's backfill.
+    //
+    // D1 already moved a sibling backfill to the end of sync_all, so version_history
+    // is re-populated on every successful sync_all. D2 closes the cold-boot race by
+    // gating ONLY the watcher's one-shot startup backfill query behind a oneshot
+    // signal fired when sync_all completes (success or failure). The watcher's live
+    // filesystem-event branch and cancellation branch remain ungated — the API
+    // listener and live ingestion stay immediately active during cold boot.
+    let (sync_done_tx, sync_done_rx) = tokio::sync::oneshot::channel::<()>();
+
     // Spawn the notify watcher on a blocking thread. If the projects_dir does
     // not exist yet (Claude Code may not have created sessions), this will
     // return an error that we log as a warning and continue — the watcher is
     // optional for basic daemon operation.
+    //
+    // The receiver `sync_done_rx` is moved into the watcher_loop spawn closure on
+    // success. If spawn_watcher fails, the receiver is dropped here; that does not
+    // matter because no watcher_loop is running to await it. The sender side is
+    // still fired below to avoid leaking resources.
+    let mut sync_done_rx_opt = Some(sync_done_rx);
     match crate::watcher::spawn_watcher(projects_dir.clone(), watch_tx) {
         Ok(()) => {
             // Spawn the watcher processing loop as a tokio task.
@@ -98,8 +118,18 @@ pub async fn run_server(
             let watcher_conn = state.conn.clone();
             let watcher_event_tx = state.event_tx.clone();
             let watcher_token = token.clone();
+            let watcher_sync_done = sync_done_rx_opt
+                .take()
+                .expect("sync_done_rx is taken exactly once when spawn_watcher succeeds");
             tokio::spawn(async move {
-                crate::watcher::watcher_loop(watch_rx, watcher_conn, watcher_event_tx, watcher_token).await;
+                crate::watcher::watcher_loop(
+                    watch_rx,
+                    watcher_conn,
+                    watcher_event_tx,
+                    watcher_token,
+                    watcher_sync_done,
+                )
+                .await;
             });
             tracing::info!(
                 path = %projects_dir.display(),
@@ -122,6 +152,13 @@ pub async fn run_server(
     // FSEvents coalescing) need to be caught up via a full directory walk.
     // sync_all is incremental — files already fully ingested are skipped via
     // sync_metadata offset tracking, so this is safe to run unconditionally.
+    //
+    // After sync_all returns (Ok or Err), fire `sync_done_tx` so the watcher's
+    // startup backfill (if any) can proceed. The signal is "sync_all has
+    // finished, regardless of outcome" — sending on Err preserves liveness so the
+    // watcher's own backfill still has a chance to run on the latest sessions
+    // table state. If the receiver was already dropped (spawn_watcher failed),
+    // `let _ = ...send(())` swallows the error.
     {
         let sync_conn = state.conn.clone();
         let sync_dir = projects_dir.clone();
@@ -145,6 +182,9 @@ pub async fn run_server(
                     );
                 }
             }
+            // Always fire the completion signal so the watcher's startup
+            // backfill is unblocked, regardless of sync_all's outcome.
+            let _ = sync_done_tx.send(());
         });
     }
 
