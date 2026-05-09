@@ -318,3 +318,110 @@ fn first_text_content(blocks: &[ExportContentBlock], max_len: usize) -> String {
     }
     String::new()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claude_history_store::schema::run_migrations;
+    use tokio_rusqlite::rusqlite::Connection;
+
+    /// Regression for C2.3 audit rows #28 + #29.
+    ///
+    /// Migration 011 + decompose_user step 4b project plan_content into
+    /// `message_content` as a synthetic row keyed by (message_uuid, -1,
+    /// 'plan_content') so the FTS5 external-content table picks it up on
+    /// rebuild. Pre-fix, three `query.rs` paths ordered ExportContentBlock
+    /// lists by `ORDER BY block_index ASC` without filtering on block_type;
+    /// the synthetic row's `block_index = -1` sorted FIRST, ahead of the
+    /// real `block_index = 0` text block, and `write_markdown_block`'s `_`
+    /// fallthrough arm rendered it as a leading `*[plan_content]* …`
+    /// prefix line.
+    ///
+    /// Aim: drive the markdown export over a plan-bearing user message and
+    /// assert (a) the export does not contain the `[plan_content]` marker
+    /// the `_` arm would emit, (b) the user's actual text content survives,
+    /// (c) the synthetic row is still resident in `message_content` so FTS
+    /// indexability is preserved.
+    #[test]
+    fn export_markdown_filters_synthetic_plan_content_rows() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run_migrations(&conn).expect("run migrations through 011");
+
+        // Seed a session, a user message with a real text block, and the
+        // C2.3 synthetic plan_content row keyed at block_index = -1.
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at, version)
+             VALUES ('s-c2.3-export', '/tmp/c2.3', '2026-05-09T00:00:00Z', '2.1.126')",
+            [],
+        )
+        .expect("seed sessions row");
+
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp, plan_content)
+             VALUES ('m-c2.3-export', 's-c2.3-export', 'user', '2026-05-09T00:00:01Z',
+                     '# Plan body\n\nstep one: do the thing.')",
+            [],
+        )
+        .expect("seed messages row");
+
+        // Real text block at block_index = 0 — what the user actually typed.
+        conn.execute(
+            "INSERT INTO message_content (message_uuid, block_index, block_type, text_content)
+             VALUES ('m-c2.3-export', 0, 'text', 'visible-user-prose-MARKER')",
+            [],
+        )
+        .expect("seed real text block");
+
+        // Synthetic FTS-only plan_content row at the -1 sentinel.
+        conn.execute(
+            "INSERT INTO message_content (message_uuid, block_index, block_type, text_content)
+             VALUES ('m-c2.3-export', -1, 'plan_content',
+                     '# Plan body\n\nstep one: do the thing.')",
+            [],
+        )
+        .expect("seed synthetic plan_content row");
+
+        // Render markdown export.
+        let mut buf: Vec<u8> = Vec::new();
+        export_markdown(&conn, "s-c2.3-export", &mut buf)
+            .expect("export_markdown should succeed");
+        let rendered = String::from_utf8(buf).expect("markdown utf-8");
+
+        // Negative assertions — the leak signatures from the `_` fallthrough.
+        assert!(
+            !rendered.contains("[plan_content]"),
+            "rendered markdown must not contain the `[plan_content]` marker \
+             the `_` fallthrough arm would emit; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("step one: do the thing."),
+            "rendered markdown must not contain the plan body text the \
+             synthetic row carried; got:\n{rendered}"
+        );
+
+        // Positive assertion — the real text block still surfaces.
+        assert!(
+            rendered.contains("visible-user-prose-MARKER"),
+            "rendered markdown must still contain the user's real text block; \
+             got:\n{rendered}"
+        );
+
+        // FTS-preservation assertion — the synthetic row remains in
+        // message_content so the existing FTS5 rebuild path can index it.
+        let synthetic_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_content
+                 WHERE message_uuid = 'm-c2.3-export'
+                   AND block_index = -1
+                   AND block_type = 'plan_content'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count synthetic plan_content rows");
+        assert_eq!(
+            synthetic_count, 1,
+            "the synthetic plan_content row must remain in message_content \
+             for FTS indexability — the export filter is read-side only"
+        );
+    }
+}

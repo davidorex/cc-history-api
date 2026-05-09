@@ -624,7 +624,10 @@ const QUERIES_SCHEMA_HELP: &str = r#"DATABASE SCHEMA:
   Tables:
     sessions          session_id*, project_path, first_seen_at, last_seen_at, version, slug, git_branch
     messages          uuid*, session_id→sessions, type, timestamp, parent_uuid, model, stop_reason, is_compact_summary, agent_id, subtype
-    message_content   id*, message_uuid→messages, block_index, block_type(text|thinking|tool_use|tool_result), text_content, tool_name, tool_input
+    message_content   id*, message_uuid→messages, block_index, block_type(text|thinking|tool_use|tool_result|plan_content), text_content, tool_name, tool_input
+                      Note: block_type='plan_content' rows are FTS-only synthetic projections of messages.plan_content (migration 011)
+                      and use sentinel block_index = -1. Ad-hoc SQL targeting real message blocks should add
+                      `WHERE block_type != 'plan_content'` (or `WHERE block_index >= 0`) to exclude them.
     token_usage       message_uuid*→messages, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
     tool_executions   id*, message_uuid→messages, tool_use_id, tool_name, input_json, result_content, is_error
     files             id*, session_id→sessions, file_path, first_seen, last_modified, operation_count

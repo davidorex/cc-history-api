@@ -995,11 +995,19 @@ pub fn session_messages_for_export(
         )?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // 2. For each message, load content blocks and token usage
+    // 2. For each message, load content blocks and token usage.
+    //    The `block_type != 'plan_content'` filter excludes synthetic
+    //    block_index = -1 rows introduced by migration 011 / decompose_user
+    //    step 4b. Those rows live in message_content for FTS-indexability of
+    //    plan markdown but are not user-facing content blocks; including
+    //    them in export output produced a leading `*[plan_content]*` prefix
+    //    line via `write_markdown_block`'s `_` fallthrough arm. Aim: keep
+    //    the synthetic rows FTS-only by filtering them out of every export
+    //    query that builds an ExportContentBlock list.
     let mut content_stmt = conn.prepare(
         "SELECT block_index, block_type, text_content, tool_use_id, tool_name, tool_input, is_error
          FROM message_content
-         WHERE message_uuid = ?1
+         WHERE message_uuid = ?1 AND block_type != 'plan_content'
          ORDER BY block_index ASC",
     )?;
 
@@ -1145,11 +1153,14 @@ pub fn session_conversation(
             )?
             .collect::<Result<Vec<_>, _>>()?;
 
-    // 2. For each message, load content blocks and token usage
+    // 2. For each message, load content blocks and token usage.
+    //    Filter `block_type != 'plan_content'` to keep migration-011's
+    //    synthetic FTS-only rows (block_index = -1) out of the conversation
+    //    block list — same rationale as session_messages_for_export above.
     let mut content_stmt = conn.prepare(
         "SELECT block_index, block_type, text_content, tool_use_id, tool_name, tool_input, is_error
          FROM message_content
-         WHERE message_uuid = ?1
+         WHERE message_uuid = ?1 AND block_type != 'plan_content'
          ORDER BY block_index ASC",
     )?;
 
@@ -1375,11 +1386,16 @@ pub fn get_message(
         None => return Ok(None),
     };
 
-    // Load content blocks
+    // Load content blocks. The `block_type != 'plan_content'` predicate
+    // matches the export-side filter in session_messages_for_export and
+    // session_conversation: synthetic block_index = -1 rows from migration
+    // 011 / decompose_user step 4b are FTS-only and not user-facing message
+    // blocks; excluding them here keeps single-message retrieval semantics
+    // aligned with batched export retrieval.
     let mut content_stmt = conn.prepare(
         "SELECT block_index, block_type, text_content, tool_use_id, tool_name, tool_input, is_error
          FROM message_content
-         WHERE message_uuid = ?1
+         WHERE message_uuid = ?1 AND block_type != 'plan_content'
          ORDER BY block_index ASC",
     )?;
 
