@@ -1,6 +1,6 @@
 //! claude-history CLI binary.
 //!
-//! Provides the `claude-history` command with 20 subcommands for syncing JSONL
+//! Provides the `claude-history` command with 21 subcommands for syncing JSONL
 //! session files into a local SQLite database, starting the HTTP/UDS daemon,
 //! searching message content, browsing sessions, querying messages, viewing
 //! usage statistics, exporting sessions, checking Claude Code versions,
@@ -109,9 +109,11 @@ enum Commands {
         /// Show sessions before this date (YYYY-MM-DD or ISO8601)
         #[arg(long)]
         before: Option<String>,
-        /// (C2.4) Restrict to sessions with at least one plan-bearing
-        /// message (`plan_content IS NOT NULL`). Pair with `--no-has-plan`
-        /// for the inverse.
+        /// (C2.4) Restrict to sessions by plan-bearing-message presence
+        /// (`plan_content IS NOT NULL`). Tri-state: omit the flag for no
+        /// filter, pass `--has-plan` or `--has-plan=true` for sessions
+        /// WITH at least one plan, and `--has-plan=false` for sessions
+        /// WITHOUT any plans. There is no separate `--no-has-plan` flag.
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
         has_plan: Option<bool>,
         /// Maximum sessions to return

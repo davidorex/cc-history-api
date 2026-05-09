@@ -708,10 +708,12 @@ pub fn print_hook_executions(rows: &[HookExecutionRow]) {
 /// Print plan rows in a column-aligned table (C2.4).
 ///
 /// Columns: SESSION (8 chars truncated), TIMESTAMP (local), PROJECT
-/// (40 chars rtrim), LEN (right-aligned bytes), PREVIEW (first ~50 chars
-/// of the markdown, with newlines collapsed to spaces so the table stays
-/// single-line). Full markdown body is omitted from the table; callers
-/// who need it should use `--json` or `plans show <session-id>`.
+/// (40 chars rtrim, multibyte-safe left-truncation via char_indices),
+/// LEN (right-aligned char count from SQLite `length(plan_content)`),
+/// PREVIEW (first ~50 chars of the markdown, with newlines collapsed to
+/// spaces so the table stays single-line). Full markdown body is omitted
+/// from the table; callers who need it should use `--json` or
+/// `plans show <session-id>`.
 pub fn print_plans_list(rows: &[PlanRow]) {
     if rows.is_empty() {
         println!("No plans found.");
@@ -738,10 +740,29 @@ pub fn print_plans_list(rows: &[PlanRow]) {
             &r.session_id
         };
         let project = r.project_path.as_deref().unwrap_or("-");
-        let project_display = if project.len() > 40 {
-            format!("...{}", &project[project.len() - 37..])
-        } else {
-            project.to_string()
+        // Multibyte-safe left-truncation: project paths are arbitrary
+        // strings from sessions.project_path and are not guaranteed to
+        // be ASCII. Byte-indexing into a multibyte UTF-8 char would
+        // panic at runtime. char_indices() lets us pick a code-point
+        // boundary by counting from the end and slicing on the byte
+        // index of that boundary.
+        let project_display = {
+            let char_count = project.chars().count();
+            if char_count > 40 {
+                // Skip leading chars so the suffix has 37 chars; prefix
+                // with "..." for a 40-wide cell. nth(N) returns the
+                // byte index of the (N+1)th char; we want to start the
+                // suffix at the (char_count - 37)th char.
+                let start_char = char_count - 37;
+                let start_byte = project
+                    .char_indices()
+                    .nth(start_char)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                format!("...{}", &project[start_byte..])
+            } else {
+                project.to_string()
+            }
         };
         // Collapse newlines / tabs to single spaces so table rows stay on
         // one line. char_indices()-based truncation keeps this safe for
@@ -787,7 +808,12 @@ pub fn print_plan_show(rows: &[PlanFullRow]) {
         );
         println!("MESSAGE:    {}", r.message_uuid);
         println!("TIMESTAMP:  {}", to_local(&r.timestamp));
-        println!("LENGTH:     {} bytes", r.plan_content.len());
+        // Char count to align with `plans_list`'s `plan_content_length`,
+        // which comes from SQLite `length(plan_content)` (char count for
+        // TEXT). The unit label is "chars" to make the semantic explicit
+        // and to avoid the prior "bytes" label that disagreed with the
+        // list-view value for non-ASCII plans.
+        println!("LENGTH:     {} chars", r.plan_content.chars().count());
         println!("---");
         println!("{}", r.plan_content);
     }

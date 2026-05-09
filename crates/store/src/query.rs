@@ -164,9 +164,11 @@ pub struct HookExecutionRow {
 /// body is fetched via `plans show <session-id>` (returns `PlanFullRow`).
 ///
 /// Ordering: callers receive rows ordered by `timestamp DESC` (newest first).
-/// `plan_content_length` is a byte count of the source markdown — useful for
-/// surfacing oversize plans without paying the row-fetch cost on the full
-/// body.
+/// `plan_content_length` is the SQLite `length(plan_content)` value, which
+/// for TEXT storage class returns a UTF-16-style character count rather than
+/// a byte count. It is intended as a coarse oversize indicator, not a
+/// storage-aligned byte size; callers needing byte size should
+/// `length(CAST(plan_content AS BLOB))` separately.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlanRow {
     pub session_id: String,
@@ -1013,7 +1015,7 @@ pub fn hook_executions_list(
 /// `plan_content_preview` is the first ~200 chars of the markdown via
 /// `substr(plan_content, 1, 200)`. The full body is intentionally not
 /// returned in list view; callers wanting full markdown call `plan_show`.
-/// `plan_content_length` is `length(plan_content)` — byte-count of the text,
+/// `plan_content_length` is `length(plan_content)` — char-count of the text,
 /// not character count (acceptable for the surface contract: it is a sizing
 /// signal for callers, not an indexable metric).
 ///
