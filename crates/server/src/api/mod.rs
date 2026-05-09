@@ -2,7 +2,7 @@
 //!
 //! Exposes endpoint handlers organized by resource (health, sessions, messages,
 //! search, analytics, export, schema, projects, sql, files, git, artifacts,
-//! events) and a `build_router` function that assembles all 32 routes into an
+//! events) and a `build_router` function that assembles all 36 routes into an
 //! axum Router with shared application state and TraceLayer middleware for
 //! request/response logging.
 
@@ -31,7 +31,7 @@ use crate::state::SharedState;
 
 /// Build the axum Router with all API routes and shared state.
 ///
-/// Registers 32 endpoints across 14 resource groups with TraceLayer
+/// Registers 36 endpoints across 16 resource groups with TraceLayer
 /// middleware for structured request/response logging:
 ///
 /// **Health:**
@@ -89,6 +89,13 @@ use crate::state::SharedState;
 /// **Artifacts:** [API-26 and API-27]
 ///   - GET /v1/artifacts/{session_id}
 ///   - GET /v1/artifacts/{session_id}/timeline
+///
+/// **Attachments:** [C1.4]
+///   - GET /v1/attachments
+///   - GET /v1/attachments/{uuid}
+///
+/// **Hook executions:** [C1.4]
+///   - GET /v1/hook-executions
 ///
 /// **Events:**
 ///   - GET /v1/events (SSE stream)

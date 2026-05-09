@@ -1,6 +1,6 @@
 //! claude-history CLI binary.
 //!
-//! Provides the `claude-history` command with 15 subcommands for syncing JSONL
+//! Provides the `claude-history` command with 20 subcommands for syncing JSONL
 //! session files into a local SQLite database, starting the HTTP/UDS daemon,
 //! searching message content, browsing sessions, querying messages, viewing
 //! usage statistics, exporting sessions, checking Claude Code versions,
@@ -605,7 +605,7 @@ DISCOVERY WORKFLOW:
   8. Export a session:
        claude-history export <session-id> --format markdown
 
-MCP TOOLS (13):
+MCP TOOLS (15):
 
   The same data is available via MCP for LLM tool use. Connect via:
     - Streamable HTTP: http://127.0.0.1:7424/mcp (when daemon is running)
