@@ -18,6 +18,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("007", include_str!("../migrations/007_record_type_drift.sql")),
     ("008", include_str!("../migrations/008_attachments.sql")),
     ("009", include_str!("../migrations/009_attachment_fts.sql")),
+    ("010", include_str!("../migrations/010_plan_content.sql")),
 ];
 
 /// Errors that can occur during migration application.
@@ -270,10 +271,10 @@ mod tests {
             .unwrap();
         // version_history is empty on a fresh in-memory DB (no sessions to backfill from)
         assert_eq!(vh_count, 0, "version_history should be empty on fresh DB");
-        // schema_versions should have 9 entries (one per migration after C1.3)
+        // schema_versions should have 10 entries (one per migration after C2.1)
         assert_eq!(
-            sv_count, 9,
-            "schema_versions should track all 9 applied migrations"
+            sv_count, 10,
+            "schema_versions should track all 10 applied migrations"
         );
     }
 
@@ -483,7 +484,7 @@ mod tests {
         let sv_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(sv_count, 9, "all 9 migrations should be recorded post-009");
+        assert_eq!(sv_count, 10, "all 10 migrations should be recorded post-010");
 
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -546,5 +547,164 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "migration 009 should be recorded exactly once");
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration 010: messages.plan_content TEXT column + idempotent backfill
+    // from extra_json + idx_messages_plan_content_present partial index (C2.1).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_010_adds_plan_content_column() {
+        let conn = migrated_conn();
+        // Column-shape check: SELECT against the new column should succeed
+        // post-migration. The column is nullable TEXT.
+        conn.execute_batch("SELECT plan_content FROM messages LIMIT 0")
+            .expect("messages should have plan_content column after migration 010");
+    }
+
+    #[test]
+    fn migration_010_creates_partial_index() {
+        let conn = migrated_conn();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_messages_plan_content_present'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            exists,
+            "idx_messages_plan_content_present index should exist after migration 010"
+        );
+    }
+
+    #[test]
+    fn migration_010_partial_index_predicate_filters_nulls() {
+        // Verify the partial-index WHERE clause is captured in sqlite_master.sql
+        // (SQLite stores the original DDL for indexes including the partial
+        // predicate; checking the substring guards against accidental loss
+        // of the partial-index property in future migration edits).
+        let conn = migrated_conn();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_messages_plan_content_present'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("plan_content IS NOT NULL"),
+            "partial index predicate should reference plan_content IS NOT NULL; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn migration_010_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = '010'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "migration 010 should be recorded exactly once");
+    }
+
+    #[test]
+    fn migration_010_backfills_plan_content_from_extra_json() {
+        // The migration-runner-level idempotency guard is independently
+        // covered by migration_010_idempotent. This test exercises the
+        // backfill + cleanup UPDATE statements directly: it seeds a row
+        // carrying $.planContent in extra_json BEFORE migration 010 has
+        // run, then applies migration 010's bare SQL (the same SQL the
+        // runner applies during migration 010 application).
+        //
+        // Approach: replay migrations 001..009 manually (without the
+        // runner's schema_versions guard), seed a row, then apply 010's
+        // SQL directly.
+        let conn = Connection::open_in_memory().unwrap();
+        for (_version, sql) in MIGRATIONS.iter().take(9) {
+            conn.execute_batch(sql).unwrap();
+        }
+
+        // Seed a session + message row carrying $.planContent in extra_json.
+        conn.execute(
+            "INSERT INTO sessions (session_id, project_path, first_seen_at)
+             VALUES ('sess-plan', '/test/project', '2026-05-09T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (uuid, session_id, type, timestamp, extra_json)
+             VALUES ('msg-plan', 'sess-plan', 'user', '2026-05-09T00:00:00Z',
+                     '{\"planContent\":\"# Plan\\n\\nDo the thing.\",\"otherField\":42}')",
+            [],
+        )
+        .unwrap();
+
+        // Now apply migration 010 (the ALTER + two UPDATEs + index).
+        let migration_010 = include_str!("../migrations/010_plan_content.sql");
+        conn.execute_batch(migration_010).unwrap();
+
+        // Backfill assertion: plan_content column populated from extra_json.
+        let plan_content: Option<String> = conn
+            .query_row(
+                "SELECT plan_content FROM messages WHERE uuid = 'msg-plan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            plan_content.as_deref(),
+            Some("# Plan\n\nDo the thing."),
+            "backfill UPDATE should copy $.planContent into plan_content column"
+        );
+
+        // Cleanup assertion: planContent removed from extra_json, otherField
+        // preserved. json_remove returns the residual JSON object.
+        let extra_json: String = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'msg-plan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&extra_json).unwrap();
+        assert!(
+            parsed.get("planContent").is_none(),
+            "cleanup UPDATE should strip $.planContent from extra_json; got {parsed}"
+        );
+        assert_eq!(
+            parsed.get("otherField"),
+            Some(&serde_json::json!(42)),
+            "cleanup UPDATE should preserve sibling extra_json keys"
+        );
+
+        // Idempotent-replay assertion: re-running the cleanup UPDATE leaves
+        // both columns unchanged because the WHERE clause no longer matches.
+        conn.execute_batch(
+            "UPDATE messages
+             SET extra_json = json_remove(extra_json, '$.planContent')
+             WHERE json_extract(extra_json, '$.planContent') IS NOT NULL",
+        )
+        .unwrap();
+        let extra_json_2: String = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'msg-plan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            extra_json, extra_json_2,
+            "cleanup UPDATE should be idempotent on replay"
+        );
     }
 }

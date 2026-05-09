@@ -391,9 +391,9 @@ fn insert_token_usage(
 /// Decompose a user record into sessions + messages + message_content rows.
 ///
 /// After inserting the base message row, extracts known overflow fields
-/// (isCompactSummary, sourceToolUseID) into promoted columns on messages,
-/// and serializes any remaining overflow keys into extra_json. Promoted
-/// keys are excluded from extra_json to avoid duplication.
+/// (isCompactSummary, sourceToolUseID, planContent) into promoted columns
+/// on messages, and serializes any remaining overflow keys into extra_json.
+/// Promoted keys are excluded from extra_json to avoid duplication.
 ///
 /// The UPDATE runs after INSERT OR IGNORE, so re-syncs can backfill these
 /// newly-promoted fields on existing rows.
@@ -416,11 +416,16 @@ fn decompose_user(
     // 3. Decompose message content (string or blocks)
     result.rows_inserted += decompose_message_content(&r.base.uuid, &r.message.content, tx)?;
 
-    // 4. Extract promoted overflow fields and populate extra_json
+    // 4. Extract promoted overflow fields and populate extra_json.
+    //    planContent is the C2.1 promotion; the prior two have been promoted
+    //    since migration 006 (isCompactSummary + sourceToolUseID).
     let is_compact = r.overflow.get("isCompactSummary")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let source_tool_id = r.overflow.get("sourceToolUseID")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let plan_content = r.overflow.get("planContent")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
@@ -428,6 +433,7 @@ fn decompose_user(
     let mut remaining = r.overflow.clone();
     remaining.remove("isCompactSummary");
     remaining.remove("sourceToolUseID");
+    remaining.remove("planContent");
     let extra_json = if remaining.is_empty() {
         None
     } else {
@@ -437,9 +443,19 @@ fn decompose_user(
     // UPDATE the message row with extracted values. This runs after INSERT OR
     // IGNORE so re-sync can backfill promoted fields on existing rows.
     tx.execute(
-        "UPDATE messages SET is_compact_summary = ?1, source_tool_use_id = ?2, extra_json = ?3
-         WHERE uuid = ?4",
-        rusqlite::params![is_compact as i32, source_tool_id, extra_json, r.base.uuid],
+        "UPDATE messages
+         SET is_compact_summary = ?1,
+             source_tool_use_id = ?2,
+             plan_content = ?3,
+             extra_json = ?4
+         WHERE uuid = ?5",
+        rusqlite::params![
+            is_compact as i32,
+            source_tool_id,
+            plan_content,
+            extra_json,
+            r.base.uuid,
+        ],
     )?;
 
     // 5. Upsert agent if present
@@ -2258,6 +2274,176 @@ mod tests {
             )
             .unwrap();
         assert!(extra_json.is_none(), "extra_json should be NULL when overflow is empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17b (C2.1): User record with planContent in overflow ->
+    //          plan_content column populated; planContent stripped from
+    //          extra_json so the typed column is the single source of truth.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_plan_content() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let mut overflow = HashMap::new();
+        overflow.insert(
+            "planContent".to_string(),
+            serde_json::json!("# Plan\n\nDo the thing in three steps."),
+        );
+
+        let record = UserRecord {
+            base: test_base("user-plan", "sess-plan"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("plan-bearing user record".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow,
+        };
+
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        // plan_content column populated with the markdown body.
+        let plan_content: Option<String> = conn
+            .query_row(
+                "SELECT plan_content FROM messages WHERE uuid = 'user-plan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            plan_content.as_deref(),
+            Some("# Plan\n\nDo the thing in three steps."),
+            "plan_content column should hold the promoted overflow value"
+        );
+
+        // extra_json should be NULL because planContent was the only
+        // overflow key and has been promoted out.
+        let extra_json: Option<String> = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'user-plan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            extra_json.is_none(),
+            "extra_json should be NULL when only-overflow key was promoted; got {extra_json:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17c (C2.1): User record with planContent + a sibling unknown
+    //          overflow key -> plan_content column populated; sibling
+    //          retained in extra_json; planContent absent from extra_json.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_plan_content_with_sibling_overflow() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let mut overflow = HashMap::new();
+        overflow.insert(
+            "planContent".to_string(),
+            serde_json::json!("# Plan\n- step one\n- step two"),
+        );
+        overflow.insert(
+            "futureField".to_string(),
+            serde_json::json!("not-yet-modeled"),
+        );
+
+        let record = UserRecord {
+            base: test_base("user-plan-sib", "sess-plan-sib"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("plan + sibling overflow".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow,
+        };
+
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        let plan_content: Option<String> = conn
+            .query_row(
+                "SELECT plan_content FROM messages WHERE uuid = 'user-plan-sib'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            plan_content.as_deref(),
+            Some("# Plan\n- step one\n- step two"),
+        );
+
+        let extra_json: String = conn
+            .query_row(
+                "SELECT extra_json FROM messages WHERE uuid = 'user-plan-sib'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&extra_json).unwrap();
+        assert!(
+            parsed.get("planContent").is_none(),
+            "planContent should NOT appear in extra_json after promotion; got {parsed}"
+        );
+        assert_eq!(
+            parsed.get("futureField"),
+            Some(&serde_json::json!("not-yet-modeled")),
+            "sibling overflow keys should be preserved in extra_json"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17d (C2.1): User record with no planContent -> plan_content
+    //          column is NULL. Confirms the new column doesn't get spuriously
+    //          populated for non-plan messages (the vast majority).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decompose_user_no_plan_content() {
+        let conn = setup_db();
+        let tx = conn.unchecked_transaction().unwrap();
+
+        let record = UserRecord {
+            base: test_base("user-no-plan", "sess-no-plan"),
+            message: UserMessage {
+                role: "user".to_string(),
+                content: MessageContent::Text("plain user message".to_string()),
+            },
+            source_tool_assistant_uuid: None,
+            tool_use_result: None,
+            thinking_metadata: None,
+            todos: None,
+            permission_mode: None,
+            overflow: HashMap::new(),
+        };
+
+        decompose_user(&record, &tx).unwrap();
+        tx.commit().unwrap();
+
+        let plan_content: Option<String> = conn
+            .query_row(
+                "SELECT plan_content FROM messages WHERE uuid = 'user-no-plan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            plan_content.is_none(),
+            "plan_content should be NULL for messages without a planContent overflow key; got {plan_content:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
