@@ -2,6 +2,8 @@
 
 Ingests Claude Code JSONL session files into a normalized SQLite database and serves them via CLI, HTTP API, and MCP tools.
 
+I use it as an archaeological tool to surface historical intentions, decisions, and actions to inform development of projects.
+
 ## What it captures
 
 From each session JSONL (`~/.claude/projects/<encoded-dir>/<session-id>.jsonl` plus `*/subagents/agent-*.jsonl`):
@@ -14,6 +16,61 @@ From each session JSONL (`~/.claude/projects/<encoded-dir>/<session-id>.jsonl` p
 - Schema-drift events (unknown JSON fields and unknown record-type discriminators)
 - Attachment records (hook executions, mcp_instructions_delta, skill_listing, edited_text_file, plan-mode, etc.)
 - Plan-mode markdown bodies (`user.planContent`)
+- Session metadata: start/end timestamps, project path, Claude Code version per turn, model used per turn
+- Subagent session records from `*/subagents/agent-*.jsonl` with parent-session linkage
+- Compaction summary records (`is_compact_summary`-flagged user messages)
+
+## Features
+
+**Ingestion**
+
+- Filesystem watcher syncs JSONL writes within ~5 seconds (debounced); runs foreground or under macOS launchd supervision
+- Manual `claude-history sync` catches up from any state; idempotent via UUID-keyed `INSERT OR IGNORE` — no duplicate rows on re-run
+- Bytewise re-ingestion: scoped `sync_metadata.last_byte_offset` reset re-decodes chosen files through the current code path (recovery for newly-typed records, schema fixes, etc.)
+
+**Search**
+
+- Full-text search across message content via FTS5 with BM25 ranking and `>>>highlight<<<` snippets
+- Cross-source unified search: results tagged `{kind: "message"}` or `{kind: "attachment", subtype: "..."}`
+- Search restricted to plan-mode markdown only via `/v1/plans/search`
+- Search across file operations (path + content)
+- FTS5 query syntax: AND, OR, NOT, `"phrase match"`, `prefix*`
+
+**Listing / browsing**
+
+- Surfaces for sessions, messages, files, file history, git operations, attachments, hook executions, plans
+- Filter axes by surface: project (substring), date range, model, tool, `has_plan`, `inner_type`, `hook_event`, `exit_code`, `tool_use_id`
+- Output: human-readable tables or `--json` for machine parsing
+
+**Analytics**
+
+- Token usage breakdown by model, tool, date range
+- Tool frequency stats
+- 7 analytical SQL views (`v_file_token_cost`, `v_file_conversation_context`, `v_project_summary`, `v_file_provenance`, `v_git_commit_context`, `v_tool_errors`, `v_session_cost`)
+
+**Recovery / reconstruction**
+
+- File content reconstruction at a point in time from accumulated read/edit operations
+- Session export as markdown or JSON; synthetic plan_content rows filtered from export output
+- Combined artifacts view: files + git operations per session
+
+**Drift detection**
+
+- Field-level: unknown JSON fields captured to `schema_drift_log` with per-version occurrence counts and sample values
+- Discriminator-level: unknown JSONL record-`type` values captured to `record_type_drift_log` (outer-level catch-all via `JSONLRecord::Unknown`; namespaced inner subtypes like `attachment.<subtype>` for unmodeled attachment shapes)
+- Version-change events tracked in `version_history`; `claude-history version-check` surfaces Claude Code version progression
+- CLI + REST + MCP surfaces for both drift logs
+
+**Query authoring**
+
+- Read-only SQL passthrough via `execute_sql` MCP tool or `claude-history queries run`
+- Canned queries: `.sql` + optional `.toml` sidecar pairs (param type hints `integer` / `real` for numeric comparisons)
+- Schema reference: `claude-history queries --help`
+
+**Bookmarks**
+
+- Read-only access to ClaudeHistoryBrowser's bookmark database (separate from session history; survives session-history rebuilds)
+- 3 MCP tools: `list_bookmarks`, `search_bookmarks`, `get_bookmark`
 
 ## Build
 
