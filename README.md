@@ -4,6 +4,18 @@ Ingests Claude Code JSONL session files into a normalized SQLite database and se
 
 I use it as an archaeological tool to surface historical intentions, decisions, and actions to inform development of projects.
 
+- [What it captures](#what-it-captures)
+- [Features](#features)
+- [Build](#build)
+- [Surfaces](#surfaces)
+- [Architecture](#architecture)
+- [Schema](#schema)
+- [Sync model](#sync-model)
+- [Canned queries](#canned-queries)
+- [Development](#development)
+- [Known Limitations](#known-limitations)
+- [License](#license)
+
 ## What it captures
 
 From each session JSONL (`~/.claude/projects/<encoded-dir>/<session-id>.jsonl` plus `*/subagents/agent-*.jsonl`):
