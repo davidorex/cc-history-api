@@ -183,6 +183,14 @@ tail -f ~/Library/Logs/claude-history.err.log                           # live s
 - Failed records route through the `JSONLRecord::Unknown` outer-level catch-all — typed envelope lost
 - Resolution: manual two-pass `Deserialize` on `ContentBlock` analogous to the outer-level fix
 
+**Tool-result content stores raw harness-inserted text alongside actual tool output.**
+
+- Every `Read` tool_result has Anthropic's `<system-reminder>` block appended by the harness — currently ~34K occurrences across ~1,070 sessions in the live DB and growing
+- The decomposer persists this verbatim into `message_content.text_content`; the FTS5 index surfaces those blocks on search hits
+- An agent retrieving content via `search_messages`, `query_messages`, `execute_sql`, or any other surface receives text shaped like harness instructions but stored as data — naive agents may misinterpret
+- Fix shape: decomposer-time tag-and-preserve — extract recognized harness substrings into a new `harness_inserts TEXT` column on `message_content`; FTS5 indexes only the actual tool-output body; full forensic recovery preserved
+- Backfill: bytewise re-ingestion at corpus scale (≥1,000 files)
+
 **Supervised daemon operation is documented for macOS only.**
 
 - The daemon-supervision protocol above (§Daemon supervision (macOS)) uses launchd
