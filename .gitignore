@@ -39,3 +39,9 @@ mcpb/*.mcpb
 # contributor-facing content lives in README.md; CLAUDE.md remains a
 # personal-config artifact, not project source.
 CLAUDE.md
+
+# Personal development records — roadmap state, audit/triage/review chain
+# forensics per commit, subagent-prompt templates, investigation reports,
+# milestones, requirements. Single-instance development workflow artifacts,
+# not project source.
+.planning/

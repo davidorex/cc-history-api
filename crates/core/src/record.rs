@@ -32,10 +32,9 @@ use crate::system::SystemRecord;
 /// not by `#[serde(tag = "type")]`. The two-pass dispatch — deserialize to
 /// `serde_json::Value`, inspect the `type` field, then dispatch to the typed
 /// variant struct via `serde_json::from_value` or fall back to the `Unknown`
-/// variant — is the mechanism the audit at
-/// `.planning/audit/jsonl-unknown-record-type-attachment-investigation-2026-05-08T0551-asia-shanghai.md`
-/// describes as Path A. `#[serde(tag = "type")]` does not natively support a
-/// catch-all variant that preserves the payload, so the dispatch is hand-written.
+/// variant — is the mechanism that allows a catch-all preserving both the
+/// discriminator name and the raw payload. `#[serde(tag = "type")]` does not
+/// natively support such a catch-all, so the dispatch is hand-written.
 ///
 /// Records whose JSON has no `type` field, or whose `type` is not a JSON
 /// string, return a deserializer error — preserving the existing

@@ -175,7 +175,6 @@ tail -f ~/Library/Logs/claude-history.err.log                           # live s
 - Typed `attachments` and `hook_executions` tables are populated by ingestion through the current decomposer
 - Records ingested before the typed Attachment surface existed remain in `record_type_drift_log` only — do not appear in `attachments` / `hook_executions` / `fts_attachment_text_content`
 - Recovery: bytewise re-ingestion — scope-reset `sync_metadata.last_byte_offset` for affected files, then `claude-history sync`
-- Procedure: `.planning/audit/c1-attachments-backfill-procedure-summary-2026-05-10T0712-asia-shanghai.md`
 
 **Inner content-block discriminator has no unknown-variant catch-all.**
 
