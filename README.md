@@ -82,3 +82,17 @@ See `CLAUDE.md` for:
 - Anti-pattern callout against manual `pgrep + kill + serve &` recipes
 - Seed-query copy step
 
+## Known Limitations
+
+- **Historical attachment records require one-time backfill.** The typed `attachments` and `hook_executions` tables are populated by ingestion through the current decomposer. Records ingested before the typed Attachment surface existed remain in `record_type_drift_log` only and do not appear in `attachments` / `hook_executions` / `fts_attachment_text_content`. A bytewise re-ingestion procedure (scope-reset `sync_metadata.last_byte_offset` for affected files, then run `claude-history sync`) populates the typed tables retroactively. Procedure outlined at `.planning/audit/c1-attachments-backfill-procedure-summary-2026-05-10T0712-asia-shanghai.md`.
+
+- **Inner content-block discriminator has no unknown-variant catch-all.** The `ContentBlock` enum (text / thinking / tool_use / tool_result) uses serde's default tagged-enum derive. Records with content-block types outside the four known discriminators (e.g., a future `image` or `video` block) fail deserialization at the parent-message level and route through the `JSONLRecord::Unknown` outer-level catch-all, losing the typed envelope. Resolution requires manual two-pass `Deserialize` on `ContentBlock` analogous to the outer-level fix.
+
+- **Supervised daemon operation is documented for macOS only.** The daemon-supervision protocol in `CLAUDE.md` uses launchd. Linux operation via systemd or other supervisors is untested. The `claude-history serve` binary itself runs as a foreground process on any Unix-like system.
+
+- **Claude Desktop MCPB extension may lag the source binary.** The `mcpb/manifest.json` references a bundled binary at `mcpb/bin/claude-history`. Updates to the source do not auto-propagate to Claude Desktop; the `.mcpb` archive must be rebuilt and re-installed manually via Claude Desktop → Settings → Extensions.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
