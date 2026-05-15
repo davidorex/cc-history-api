@@ -32,3 +32,10 @@ cc-history-api.md
 # step, and are kept out of git history to avoid bloat
 mcpb/bin/
 mcpb/*.mcpb
+
+# Personal Claude Code agent instructions for this checkout — single-user
+# launchd labels, single-instance memory paths, cross-session-context
+# pointers calibrated to the author's instance. General operator and
+# contributor-facing content lives in README.md; CLAUDE.md remains a
+# personal-config artifact, not project source.
+CLAUDE.md

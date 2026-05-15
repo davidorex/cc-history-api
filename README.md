@@ -12,7 +12,8 @@ I use it as an archaeological tool to surface historical intentions, decisions, 
 - [Schema](#schema)
 - [Sync model](#sync-model)
 - [Canned queries](#canned-queries)
-- [Development](#development)
+- [Daemon supervision (macOS)](#daemon-supervision-macos)
+- [Development workflow](#development-workflow)
 - [Known Limitations](#known-limitations)
 - [License](#license)
 
@@ -103,7 +104,7 @@ For supervised daemon operation on macOS, install the user-level launchd LaunchA
 
 - **CLI**: 21 subcommands (`claude-history --help`). Major: `sync`, `search`, `sessions`, `query`, `files`, `file-history`, `git-log`, `stats`, `export`, `attachments`, `plans`, `hook-executions`, `queries`, `record-type-drift`, `schema-drift`, `version-check`, `reconstruct`, `artifacts`, `mcp-stdio`, `mcp-config`, `serve`. Most subcommands accept `--json` for machine-readable output.
 - **HTTP API**: 39 routes under `/v1/*` served on `127.0.0.1:7424` and a Unix domain socket at `/tmp/claude-history.sock`. Resource groups: sessions, messages, search, analytics, export, schema, projects, sql, files, git, artifacts, attachments, hook-executions, plans, events, health.
-- **MCP**: 17 tools at `/mcp` (streamable HTTP) or via `claude-history mcp-stdio` (Claude Desktop). Tool surface enumerated in `CLAUDE.md`. Run `claude-history mcp-config` for client configuration snippets.
+- **MCP**: 17 tools at `/mcp` (streamable HTTP) or via `claude-history mcp-stdio` (Claude Desktop). Tools: `search_messages`, `list_sessions`, `query_messages`, `list_files`, `file_history`, `git_log`, `get_stats`, `execute_sql`, `run_query`, `list_queries`, `list_bookmarks`, `search_bookmarks`, `get_bookmark`, `list_attachments`, `get_hook_executions`, `list_plans`, `get_plan`. Run `claude-history mcp-config` for client configuration snippets.
 
 ## Architecture
 
@@ -143,14 +144,36 @@ claude-history queries list
 claude-history queries run <name> --param key=value
 ```
 
-## Development
+## Daemon supervision (macOS)
 
-See `CLAUDE.md` for:
+- Default: `claude-history serve` runs as a foreground process (per `run_server` in `crates/server/src/serve.rs`)
+- Supervised operation that survives terminal close / logout / reboot: install a user-level launchd LaunchAgent
+- Author's instance uses label `com.davidrex.claude-history` at `~/Library/LaunchAgents/com.davidrex.claude-history.plist` — substitute your own label / path; commands below assume you have
 
-- Post-build daemon-restart protocol (`launchctl kickstart -k`)
-- Daemon supervision via launchd LaunchAgent
-- Anti-pattern callout against manual `pgrep + kill + serve &` recipes
-- Seed-query copy step
+```bash
+launchctl list | grep claude-history                                    # status
+launchctl kickstart -k gui/$(id -u)/<your-label>                        # restart (e.g., after `cargo build --release`)
+launchctl unload   -w  ~/Library/LaunchAgents/<your-label>.plist        # disable persistently
+launchctl load     -w  ~/Library/LaunchAgents/<your-label>.plist        # re-enable
+tail -f ~/Library/Logs/claude-history.err.log                           # live structured logs (tracing crate, stderr)
+```
+
+- **After `cargo build --release`**: restart the daemon (`launchctl kickstart -k`) so the new binary is mmapped. Stale daemon = stale behavior across all CLI / HTTP / MCP / UDS clients.
+- **Anti-pattern**: do NOT `pgrep -f 'claude-history serve' | xargs kill` then `claude-history serve &`. Killing the supervised process triggers a launchd respawn within `ThrottleInterval` (10 s); manual `serve &` then races the respawn for port 7424 and the UDS socket. Use `launchctl kickstart -k` — it cleanly terminates and replaces the supervised process atomically.
+- Linux operation via systemd or other supervisors is untested; the foreground `serve` binary works on any Unix-like system
+
+## Development workflow
+
+Non-trivial implementation commits go through a 4-task chain:
+
+1. **Implementation** — the commit itself, scoped per a plan section
+2. **Adversarial audit** — independent review for coverage of finding (every meaningful divergence/deviation/gap recorded, no severity language)
+3. **Deviation triage** — structured classification of the audit catalog along orthogonal axes (plan-spec reach: plan-defect / impl-defect / mutual / informational; build/test impact; determinism)
+4. **Parent-agent review** — accept / record / resolve decisions per deviation; resolution-subagent spawned for architectural-debt impl-defects
+
+- Records: `.planning/audit/<topic>-YYYY-MM-DDThhmm-asia-shanghai.md`
+- Cross-session handoff ledger: `.planning/STATE.md` (roadmap status + post-roadmap operational addendum + currently-open architectural debt)
+- Seed canned queries in `queries/` must be copied to `~/.claude/claude-history/queries/` to be available at runtime — no install/sync mechanism, manual copy after changes
 
 ## Known Limitations
 
