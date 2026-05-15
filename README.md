@@ -163,6 +163,13 @@ tail -f ~/Library/Logs/claude-history.err.log                           # live s
 
 ## Known Limitations
 
+**Developed on and within macOS context.**
+
+- Project is built, tested, and operated on macOS — Apple Silicon
+- Platform-coupled bits include launchd supervision (`~/Library/LaunchAgents/`, `launchctl`), log paths under `~/Library/Logs/`, the ClaudeHistoryBrowser bookmarks DB at `~/.claude/cache/chb/ClaudeHistory.sqlite` (Apple Core Data)
+- The Rust workspace itself builds cross-platform (cargo + bundled SQLite + axum + notify-rs); runtime behavior on Linux, BSD, Windows is unvalidated
+- Fork or clone if adapting to other platforms
+
 **Historical attachment records require one-time backfill.**
 
 - Typed `attachments` and `hook_executions` tables are populated by ingestion through the current decomposer
