@@ -13,7 +13,6 @@ I use it as an archaeological tool to surface historical intentions, decisions, 
 - [Sync model](#sync-model)
 - [Canned queries](#canned-queries)
 - [Daemon supervision (macOS)](#daemon-supervision-macos)
-- [Development workflow](#development-workflow)
 - [Known Limitations](#known-limitations)
 - [License](#license)
 
@@ -137,7 +136,7 @@ A scoped `UPDATE sync_metadata SET last_byte_offset = 0 WHERE file_path IN (...)
 
 ## Canned queries
 
-User-facing canned queries live in `~/.claude/claude-history/queries/` as `.sql` + optional `.toml` sidecar pairs. Seeds in this repo's `queries/` directory must be copied to the user directory to be available at runtime.
+User-facing canned queries live in `~/.claude/claude-history/queries/` as `.sql` + optional `.toml` sidecar pairs.
 
 ```bash
 claude-history queries list
@@ -162,19 +161,6 @@ tail -f ~/Library/Logs/claude-history.err.log                           # live s
 - **Anti-pattern**: do NOT `pgrep -f 'claude-history serve' | xargs kill` then `claude-history serve &`. Killing the supervised process triggers a launchd respawn within `ThrottleInterval` (10 s); manual `serve &` then races the respawn for port 7424 and the UDS socket. Use `launchctl kickstart -k` — it cleanly terminates and replaces the supervised process atomically.
 - Linux operation via systemd or other supervisors is untested; the foreground `serve` binary works on any Unix-like system
 
-## Development workflow
-
-Non-trivial implementation commits go through a 4-task chain:
-
-1. **Implementation** — the commit itself, scoped per a plan section
-2. **Adversarial audit** — independent review for coverage of finding (every meaningful divergence/deviation/gap recorded, no severity language)
-3. **Deviation triage** — structured classification of the audit catalog along orthogonal axes (plan-spec reach: plan-defect / impl-defect / mutual / informational; build/test impact; determinism)
-4. **Parent-agent review** — accept / record / resolve decisions per deviation; resolution-subagent spawned for architectural-debt impl-defects
-
-- Records: `.planning/audit/<topic>-YYYY-MM-DDThhmm-asia-shanghai.md`
-- Cross-session handoff ledger: `.planning/STATE.md` (roadmap status + post-roadmap operational addendum + currently-open architectural debt)
-- Seed canned queries in `queries/` must be copied to `~/.claude/claude-history/queries/` to be available at runtime — no install/sync mechanism, manual copy after changes
-
 ## Known Limitations
 
 - **Historical attachment records require one-time backfill.** The typed `attachments` and `hook_executions` tables are populated by ingestion through the current decomposer. Records ingested before the typed Attachment surface existed remain in `record_type_drift_log` only and do not appear in `attachments` / `hook_executions` / `fts_attachment_text_content`. A bytewise re-ingestion procedure (scope-reset `sync_metadata.last_byte_offset` for affected files, then run `claude-history sync`) populates the typed tables retroactively. Procedure outlined at `.planning/audit/c1-attachments-backfill-procedure-summary-2026-05-10T0712-asia-shanghai.md`.
@@ -184,6 +170,8 @@ Non-trivial implementation commits go through a 4-task chain:
 - **Supervised daemon operation is documented for macOS only.** The daemon-supervision protocol in `CLAUDE.md` uses launchd. Linux operation via systemd or other supervisors is untested. The `claude-history serve` binary itself runs as a foreground process on any Unix-like system.
 
 - **Claude Desktop MCPB extension may lag the source binary.** The `mcpb/manifest.json` references a bundled binary at `mcpb/bin/claude-history`. Updates to the source do not auto-propagate to Claude Desktop; the `.mcpb` archive must be rebuilt and re-installed manually via Claude Desktop → Settings → Extensions.
+
+- **Seed canned queries do not auto-sync.** Seed `.sql` / `.toml` pairs in this repo's `queries/` directory are not automatically installed to the user-facing location at `~/.claude/claude-history/queries/`. Changes to seeds require manual copy; there is no install or sync mechanism.
 
 Produced and directed by me, coded by Claude Code. 
 
