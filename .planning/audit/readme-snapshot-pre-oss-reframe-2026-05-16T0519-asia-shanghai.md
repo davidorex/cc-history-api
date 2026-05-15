@@ -82,3 +82,6 @@ See `CLAUDE.md` for:
 - Anti-pattern callout against manual `pgrep + kill + serve &` recipes
 - Seed-query copy step
 
+## Status
+
+The MVP shipped 2026-02-21 with the original 10 MCP tools. Subsequent post-MVP work (2026-05-08 onwards) added: launchd supervision, log rotation, MCPB rebundle, JSONLRecord::Unknown catch-all + record_type_drift_log (B1 chain), typed Attachment + hook_executions tables (C1 chain), planContent promotion + FTS coverage (C2 chain), and version_history sync-path cleanups (D chain). Audit + triage + review records for each commit live in `.planning/audit/`.
