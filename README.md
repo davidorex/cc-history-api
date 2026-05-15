@@ -81,7 +81,8 @@ From each session JSONL (`~/.claude/projects/<encoded-dir>/<session-id>.jsonl` p
 
 **Bookmarks**
 
-- Read-only access to ClaudeHistoryBrowser's bookmark database (separate from session history; survives session-history rebuilds)
+- Read-only access to bookmarks created in **ClaudeHistoryBrowser (CHB)** — a separate macOS Core Data app, not part of this repo. CHB lets users save assistant messages with labels and tags while browsing session history.
+- The CHB database lives at `~/.claude/cache/chb/ClaudeHistory.sqlite`, independent of cc-history-api's `~/.claude/.claude-history.db`. Bookmarks survive rebuilds of the session-history DB. If CHB is not installed, the bookmark queries return empty / "not found".
 - 3 MCP tools: `list_bookmarks`, `search_bookmarks`, `get_bookmark`
 
 ## Build
@@ -160,6 +161,8 @@ See `CLAUDE.md` for:
 - **Supervised daemon operation is documented for macOS only.** The daemon-supervision protocol in `CLAUDE.md` uses launchd. Linux operation via systemd or other supervisors is untested. The `claude-history serve` binary itself runs as a foreground process on any Unix-like system.
 
 - **Claude Desktop MCPB extension may lag the source binary.** The `mcpb/manifest.json` references a bundled binary at `mcpb/bin/claude-history`. Updates to the source do not auto-propagate to Claude Desktop; the `.mcpb` archive must be rebuilt and re-installed manually via Claude Desktop → Settings → Extensions.
+
+Produced and directed by me, coded by Claude Code. 
 
 ## License
 
