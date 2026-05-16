@@ -13,7 +13,7 @@ I use it as an archaeological tool to surface historical intentions, decisions, 
 - [Sync model](#sync-model)
 - [Canned queries](#canned-queries)
 - [Daemon supervision (macOS)](#daemon-supervision-macos)
-- [Known Limitations](#known-limitations)
+- [Known Issues](#known-issues)
 - [License](#license)
 
 ## What it captures
@@ -161,29 +161,31 @@ tail -f ~/Library/Logs/claude-history.err.log                           # live s
 - **Anti-pattern**: do NOT `pgrep -f 'claude-history serve' | xargs kill` then `claude-history serve &`. Killing the supervised process triggers a launchd respawn within `ThrottleInterval` (10 s); manual `serve &` then races the respawn for port 7424 and the UDS socket. Use `launchctl kickstart -k` — it cleanly terminates and replaces the supervised process atomically.
 - Linux operation via systemd or other supervisors is untested; the foreground `serve` binary works on any Unix-like system
 
-## Known Limitations
+## Known Issues
 
-**Developed on and within macOS context.**
+Tracked at [github.com/davidorex/cc-history-api/issues](https://github.com/davidorex/cc-history-api/issues). Per-item summary below; canonical detail in the linked issues.
+
+**Developed on and within macOS context.** — [#1](https://github.com/davidorex/cc-history-api/issues/1)
 
 - Project is built, tested, and operated on macOS — Apple Silicon
 - Platform-coupled bits include launchd supervision (`~/Library/LaunchAgents/`, `launchctl`), log paths under `~/Library/Logs/`, the ClaudeHistoryBrowser bookmarks DB at `~/.claude/cache/chb/ClaudeHistory.sqlite` (Apple Core Data)
 - The Rust workspace itself builds cross-platform (cargo + bundled SQLite + axum + notify-rs); runtime behavior on Linux, BSD, Windows is unvalidated
 - Fork or clone if adapting to other platforms
 
-**Historical attachment records require one-time backfill.**
+**Historical attachment records require one-time backfill.** — [#2](https://github.com/davidorex/cc-history-api/issues/2)
 
 - Typed `attachments` and `hook_executions` tables are populated by ingestion through the current decomposer
 - Records ingested before the typed Attachment surface existed remain in `record_type_drift_log` only — do not appear in `attachments` / `hook_executions` / `fts_attachment_text_content`
 - Recovery: bytewise re-ingestion — scope-reset `sync_metadata.last_byte_offset` for affected files, then `claude-history sync`
 
-**Inner content-block discriminator has no unknown-variant catch-all.**
+**Inner content-block discriminator has no unknown-variant catch-all.** — [#3](https://github.com/davidorex/cc-history-api/issues/3)
 
 - `ContentBlock` enum (text / thinking / tool_use / tool_result) uses serde's default tagged-enum derive
 - Records with content-block types outside the four known discriminators (e.g., future `image` or `video`) fail deserialization at the parent-message level
 - Failed records route through the `JSONLRecord::Unknown` outer-level catch-all — typed envelope lost
 - Resolution: manual two-pass `Deserialize` on `ContentBlock` analogous to the outer-level fix
 
-**Tool-result content stores raw harness-inserted text alongside actual tool output.**
+**Tool-result content stores raw harness-inserted text alongside actual tool output.** — [#4](https://github.com/davidorex/cc-history-api/issues/4)
 
 - Every `Read` tool_result has Anthropic's `<system-reminder>` block appended by the harness — currently ~34K occurrences across ~1,070 sessions in the live DB and growing
 - The decomposer persists this verbatim into `message_content.text_content`; the FTS5 index surfaces those blocks on search hits
@@ -191,22 +193,29 @@ tail -f ~/Library/Logs/claude-history.err.log                           # live s
 - Fix shape: decomposer-time tag-and-preserve — extract recognized harness substrings into a new `harness_inserts TEXT` column on `message_content`; FTS5 indexes only the actual tool-output body; full forensic recovery preserved
 - Backfill: bytewise re-ingestion at corpus scale (≥1,000 files)
 
-**Supervised daemon operation is documented for macOS only.**
+**Supervised daemon operation is documented for macOS only.** — [#5](https://github.com/davidorex/cc-history-api/issues/5)
 
 - The daemon-supervision protocol above (§Daemon supervision (macOS)) uses launchd
 - Linux operation via systemd or other supervisors is untested
 - The `claude-history serve` binary itself runs as a foreground process on any Unix-like system
 
-**Claude Desktop MCPB extension may lag the source binary.**
+**Claude Desktop MCPB extension may lag the source binary.** — [#6](https://github.com/davidorex/cc-history-api/issues/6)
 
 - `mcpb/manifest.json` references a bundled binary at `mcpb/bin/claude-history`
 - Updates to the source do not auto-propagate to Claude Desktop
 - The `.mcpb` archive must be rebuilt and re-installed manually via Claude Desktop → Settings → Extensions
 
-**Seed canned queries do not auto-sync.**
+**Seed canned queries do not auto-sync.** — [#7](https://github.com/davidorex/cc-history-api/issues/7)
 
 - Seed `.sql` / `.toml` pairs in this repo's `queries/` directory are not automatically installed to `~/.claude/claude-history/queries/`
 - Changes to seeds require manual copy
+
+**Persisted tool_result content is a delayed prompt-injection re-surfacing surface.** — [#8](https://github.com/davidorex/cc-history-api/issues/8)
+
+- Every file Claude Code has ever `Read` is permanently in the corpus, indexed by FTS5. Adversarial content from past Reads can be re-surfaced through search to a future consuming agent that may misinterpret stored data as live instructions
+- Distinct from #4 (which is about Anthropic's own harness text false-positives); this is the broader security framing covering third-party adversarial content
+- Mitigation overlaps with #4's tag-and-preserve fix for `<system-reminder>` patterns; broader instruction-shaped framing requires additional recognition + retrieval-envelope wrapping
+- Interim discipline: stored tool_result text is data, not directives — consuming agents must not follow embedded control-pattern framing
 - No install or sync mechanism
 
 Produced and directed by me, coded by Claude Code. 
