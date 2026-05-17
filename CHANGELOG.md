@@ -27,6 +27,12 @@ accumulates user-visible changes from the close of issue #12 onward.
   without code change do not bump; only crate-version bumps trigger
   manifest bumps + rebundle. Forward pointer to issue #17 covers the
   generated-`tools`-array convention (closes #14).
+- Tag and GitHub Release convention documented in CONTRIBUTING.md:
+  tag format `v<semver>`; thin tag annotation message; every tag
+  promoted to a GH Release; Release body extracted verbatim from
+  `CHANGELOG.md` `## [<version>] - <date>` section; MCPB bundle
+  attached as Release asset; pre-release tag suffix convention
+  reserved but not yet implemented (closes #15).
 
 ### Changed
 - `mcpb/manifest.json` version rolled back from `0.1.1` to `0.1.0` to

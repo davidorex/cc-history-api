@@ -80,11 +80,42 @@ of the choice.
 
 ### Tag and GitHub Release convention
 
-Documented in issue #15's resolution. In summary: tag format
-`v<semver>` (e.g., `v0.1.0`); every tag is promoted to a GitHub Release
-whose body is the extracted `## [<version>] - <date>` section from
-`CHANGELOG.md`; tag annotation message stays thin (`Release v<version>`)
-since the notes live in the GH Release body.
+**Tag format**: `v<semver>` (e.g., `v0.1.0`, `v0.2.0`, `v1.0.0`). The
+`v` prefix is consistent with the existing `v1.0` pre-OSS tag and
+standard Rust / OSS practice.
+
+**Tag annotation message**: kept thin — `Release v<version>`. Release
+notes do not live in the tag annotation; duplication between the tag
+message and the GH Release body would drift. The tag is purely a
+content-addressable pointer to the commit that produced the cut.
+
+**GitHub Releases**: every `v<semver>` tag is promoted to a GitHub
+Release. The Release's body is the `## [<version>] - <date>` section
+extracted verbatim from `CHANGELOG.md` — same source-of-truth, two
+outputs (CHANGELOG entry + GH Release body), no transcription. The
+release-orchestration script (issue #16) performs the extraction +
+`gh release create` call as a required step; manual tag-pushing
+without a GH Release is not the supported path.
+
+**Release assets**: the MCPB bundle (`mcpb/*.mcpb`, built fresh during
+the cut per the lockstep rule above) is attached to the GH Release as
+a downloadable asset. This is the canonical distribution channel for
+the Claude Desktop extension; users do not build their own MCPB from
+source unless contributing.
+
+**Pre-release tags**: not yet adopted. If a pre-release-cut workflow
+becomes useful (e.g., `v0.2.0-rc.1` for a Release-Candidate vetting
+phase before the final cut), the convention would be the standard
+semver pre-release suffix (`-rc.N`, `-alpha.N`, `-beta.N`). The
+release-orchestration script does not implement pre-release support
+in its first iteration.
+
+**Historical**: the pre-OSS `v1.0` tag (Feb 21 2026) remains in place
+as a historical marker for the MVP milestone. It is not a GH Release
+and does not follow this convention; future tags do. The post-
+`0.1.0-prep` cut produces `v0.1.0` regardless of the prior `v1.0`,
+per the version-baseline decision recorded at `0.1.0-prep` milestone
+establishment.
 
 ### History
 
