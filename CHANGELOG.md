@@ -33,6 +33,20 @@ accumulates user-visible changes from the close of issue #12 onward.
   `CHANGELOG.md` `## [<version>] - <date>` section; MCPB bundle
   attached as Release asset; pre-release tag suffix convention
   reserved but not yet implemented (closes #15).
+- `scripts/sync_manifest_tools.py` derives `mcpb/manifest.json`'s
+  `tools` array from `#[tool(description = "...")]` attributes in
+  `crates/server/src/mcp/tools.rs`. Eliminates the parallel-registry
+  drift that left the prior bundle declaring 10 tools while the daemon
+  served 17. `--check` mode reports drift without writing; default
+  mode writes in place. Invoked by the release-orchestration script
+  (issue #16) during the bundling step (closes #17).
+
+### Changed
+- `mcpb/manifest.json`'s `tools` array regenerated from the live
+  daemon registry: 10 → 17 tools. Newly advertised in the bundle:
+  `list_bookmarks`, `search_bookmarks`, `get_bookmark`,
+  `list_attachments`, `get_hook_executions`, `list_plans`, `get_plan`.
+  Per the new convention, this array is no longer hand-maintained.
 
 ### Changed
 - `mcpb/manifest.json` version rolled back from `0.1.1` to `0.1.0` to

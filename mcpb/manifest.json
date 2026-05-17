@@ -23,23 +23,87 @@
     "entry_point": "bin/claude-history",
     "mcp_config": {
       "command": "${__dirname}/bin/claude-history",
-      "args": ["mcp-stdio", "--db-path", "${user_config.db_path}"]
+      "args": [
+        "mcp-stdio",
+        "--db-path",
+        "${user_config.db_path}"
+      ]
     }
   },
   "tools": [
-    { "name": "search_messages", "description": "Full-text search (FTS5) across all message content" },
-    { "name": "list_sessions", "description": "Browse sessions filtered by project, date range" },
-    { "name": "query_messages", "description": "Filter messages by session, type, model, tool, date" },
-    { "name": "list_files", "description": "Files touched by Claude Code across sessions" },
-    { "name": "file_history", "description": "Chronological operations on a specific file" },
-    { "name": "git_log", "description": "Git operations extracted from Bash tool calls" },
-    { "name": "get_stats", "description": "Token usage, tool frequency, model breakdown" },
-    { "name": "execute_sql", "description": "Read-only SQL passthrough (any SELECT query)" },
-    { "name": "run_query", "description": "Execute named canned queries with parameter binding" },
-    { "name": "list_queries", "description": "Discover available canned queries" }
+    {
+      "name": "search_messages",
+      "description": "Search message content AND attachment textual content (mcp_instructions_delta added blocks, skill_listing content, edited_text_file snippets, nested_memory content) using FTS5. Each result carries a `source` discriminator: `{kind: \"message\"}` or `{kind: \"attachment\", subtype: \"<inner_type>\"}`. Supports AND, OR, NOT, \"phrase match\", and prefix* syntax. Results ranked by bm25 relevance."
+    },
+    {
+      "name": "list_sessions",
+      "description": "List sessions with optional project, date, and limit filters."
+    },
+    {
+      "name": "query_messages",
+      "description": "Query messages with filters for session, type, model, tool, date range, and plan-content presence. has_plan=true narrows to plan-bearing messages (migration 010 plan_content column); has_plan=false narrows to messages without plan_content; omit for no filter."
+    },
+    {
+      "name": "list_files",
+      "description": "List files touched by Claude Code across sessions. Filters: session_id, path (substring match), project (substring match on project_path via sessions table). Use project to scope results to one project when the same filename appears in many."
+    },
+    {
+      "name": "file_history",
+      "description": "Show chronological file operations (read, write, edit) on a file. Path is substring matched — partial paths like 'main.rs' work. Use project to scope to a specific project. Returns operations with content, timestamps, and message UUIDs."
+    },
+    {
+      "name": "git_log",
+      "description": "Show git operations (commit, push, checkout, etc.) extracted from Bash tool calls."
+    },
+    {
+      "name": "get_stats",
+      "description": "Show token usage, tool frequency, and model breakdown statistics."
+    },
+    {
+      "name": "execute_sql",
+      "description": "Execute a read-only SQL SELECT query against the claude-history database. Use list_queries or the schema reference for table/column info."
+    },
+    {
+      "name": "run_query",
+      "description": "Execute a named canned query with parameter binding. Use list_queries to discover available queries."
+    },
+    {
+      "name": "list_queries",
+      "description": "List all available canned queries. Each query has a name, description, SQL template, and parameter definitions."
+    },
+    {
+      "name": "list_bookmarks",
+      "description": "List bookmarks from ClaudeHistoryBrowser, sorted by creation date (newest first). Bookmarks are stored in a separate database and survive session history rebuilds."
+    },
+    {
+      "name": "search_bookmarks",
+      "description": "Search bookmarks by label or tag text (substring match). Bookmarks are stored in a separate database and survive session history rebuilds."
+    },
+    {
+      "name": "list_attachments",
+      "description": "List attachment rows from the attachments table (migration 008). Filters: project (substring match against sessions.project_path), inner_type (exact match on the AttachmentBody discriminator e.g. hook_success, skill_listing, mcp_instructions_delta), since (ISO-8601 timestamp lower bound), limit (default 50). Returns attachment envelope rows ordered by timestamp DESC; body_json is included as raw JSON text."
+    },
+    {
+      "name": "get_hook_executions",
+      "description": "List rows from the hook_executions table (migration 008) — flat per-hook records produced by decomposing hook_success and hook_permission_decision attachments. Filters: tool_use_id (exact match, joins to tool_executions), hook_event (e.g. PreToolUse, PostToolUse, UserPromptSubmit, Stop), exit_code (exact match), limit (default 50). Returns rows ordered by id DESC."
+    },
+    {
+      "name": "get_bookmark",
+      "description": "Retrieve a single bookmark by its ID or by assistant message UUID. At least one of 'id' or 'assistant_uuid' must be provided."
+    },
+    {
+      "name": "list_plans",
+      "description": "List plan-mode markdown documents extracted from user.planContent (migration 010). Filters: project (substring match against sessions.project_path), since (ISO-8601 timestamp lower bound on messages.timestamp), limit (default 50). Returns rows ordered by timestamp DESC with session_id, message_uuid, project_path, timestamp, plan_content_length (char count of full markdown), and plan_content_preview (first ~200 chars). Call get_plan with a session_id to fetch the full plan body."
+    },
+    {
+      "name": "get_plan",
+      "description": "Fetch full plan-mode markdown bodies for every plan-bearing message in a session. A session can hold multiple plans across distinct user turns; rows are returned in chronological order (timestamp ASC). Returns an empty array when the session has no plan_content rows or does not exist. Each row carries session_id, message_uuid, project_path, timestamp, and the full plan_content text (no length cap)."
+    }
   ],
   "compatibility": {
     "claude_desktop": ">=1.0.0",
-    "platforms": ["darwin"]
+    "platforms": [
+      "darwin"
+    ]
   }
 }
