@@ -12,7 +12,7 @@ Pre-`0.1.0-prep` history is not backfilled here; the git log carries the
 forensic record of work prior to this file. The `[Unreleased]` section
 accumulates user-visible changes from the close of issue #12 onward.
 
-## [Unreleased]
+## [0.1.0] - 2026-05-18
 
 ### Added
 - Release infrastructure: `CHANGELOG.md` adopting Keep-a-Changelog format
