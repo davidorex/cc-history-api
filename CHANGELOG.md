@@ -40,6 +40,22 @@ accumulates user-visible changes from the close of issue #12 onward.
   served 17. `--check` mode reports drift without writing; default
   mode writes in place. Invoked by the release-orchestration script
   (issue #16) during the bundling step (closes #17).
+- `scripts/check_versions.py` verifies lockstep versioning across the
+  3 workspace crates and `mcpb/manifest.json`. Exits non-zero on drift
+  with per-file diagnostics. Suitable as a CI gate or pre-commit hook;
+  invoked by `release.py` at pre-flight and post-bump (closes #16 in
+  part).
+- `scripts/release.py <patch|minor|major> [--dry-run]` orchestrates
+  the full release cut: pre-flight (working-tree clean, required tools
+  present, version lockstep, CHANGELOG [Unreleased] non-empty); bump
+  all 4 version-bearing files in lockstep; `cargo build --release`;
+  promote CHANGELOG [Unreleased] → [version] - date; extract the
+  promoted section as GH Release notes; sync MCPB manifest tools array
+  via `sync_manifest_tools.py`; stage fresh binary into bundle; pack
+  `.mcpb` archive; commit + tag locally. Stops short of remote-
+  affecting actions; prints `git push` and `gh release create`
+  commands as next-step instructions for user authorization
+  (closes #16).
 
 ### Changed
 - `mcpb/manifest.json`'s `tools` array regenerated from the live
