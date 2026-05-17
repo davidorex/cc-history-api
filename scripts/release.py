@@ -285,9 +285,14 @@ def main() -> int:
 
     # -- 8. Commit + tag --
     print(f'\n[8/9] Commit + tag v{new}')
+    # Non-gitignored files
     run(['git', 'add'] + [str(f) for f in cargo_files] +
-        [str(root / 'Cargo.lock'), str(manifest), str(bin_in_bundle),
-         str(bundle), str(changelog)])
+        [str(root / 'Cargo.lock'), str(manifest), str(changelog)])
+    # Gitignored release assets (mcpb/bin/ and mcpb/*.mcpb are .gitignored
+    # for dev-iteration sanity, but the cut bundle is a tagged artifact
+    # whose hash is part of the release identity per #16 design rationale).
+    # `git add -f` overrides the gitignore for the release-asset paths.
+    run(['git', 'add', '-f', str(bin_in_bundle), str(bundle)])
     run(['git', 'commit', '-m', f'Release v{new}'])
     run(['git', 'tag', f'v{new}'])
 
