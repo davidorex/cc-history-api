@@ -21,8 +21,24 @@ lockstep. One bump decision applies to all four files as a unit:
 A standalone version drift across these four files is treated as a
 defect; the release-orchestration script (issue #16) enforces the
 coupling, and a `scripts/check-versions.sh` verifier (also under issue
-#16) fails CI / pre-flight if any drift is observed. The coupling rule
-itself is documented in issue #14's resolution.
+#16) fails CI / pre-flight if any drift is observed.
+
+A re-package of the same binary without code change does **not** bump
+the manifest version. Only a crate-version bump triggers a manifest
+bump + rebundle. The manifest's `version` field tracks the workspace
+crate version 1:1 in both directions: it never moves independently,
+and a workspace bump always pulls the manifest with it. This rule
+exists to keep `mcpb/manifest.json` legible as a release artifact
+(a user inspecting the bundle's version can trust it identifies the
+crate code inside) and to keep the release script's job mechanical
+rather than judgement-dependent.
+
+Note on the `tools` array in `mcpb/manifest.json`: per issue #17 the
+array is a generated artifact derived from the daemon's live tool
+registry at bundle-build time. Hand-editing the `tools` array is not
+expected; the release-orchestration script (#16) regenerates it as
+part of the bundling step. The manifest's other fields (`name`,
+`description`, `user_config`, `compatibility`) remain hand-maintained.
 
 ### Semver interpretation
 
