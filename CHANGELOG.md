@@ -17,3 +17,8 @@ accumulates user-visible changes from the close of issue #12 onward.
 ### Added
 - Release infrastructure: `CHANGELOG.md` adopting Keep-a-Changelog format
   (closes #12).
+- `CONTRIBUTING.md` with semver bump policy: lockstep workspace
+  versioning across 3 crates + MCPB manifest; bump-trigger table
+  (major / minor / patch); pre-1.0 semver convention (breaking changes
+  land in minor with explicit `### Changed` / `### Removed` callout)
+  (closes #13).
